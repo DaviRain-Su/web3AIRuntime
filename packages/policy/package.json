@@ -1,0 +1,11 @@
+{
+  "name": "@w3rt/policy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test",
+    "lint": "echo 'no lint yet'"
+  }
+}

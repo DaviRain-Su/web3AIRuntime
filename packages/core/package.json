@@ -1,0 +1,20 @@
+{
+  "name": "@w3rt/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "w3rt": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test",
+    "lint": "echo 'no lint yet'"
+  },
+  "dependencies": {
+    "@w3rt/policy": "workspace:*",
+    "@w3rt/trace": "workspace:*",
+    "@w3rt/workflow": "workspace:*",
+    "@w3rt/chains": "workspace:*"
+  }
+}

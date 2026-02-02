@@ -1,0 +1,18 @@
+networks:
+  mainnet:
+    enabled: true
+    requireApproval: true
+    requireSimulation: true
+    maxDailyVolumeUsd: 500
+  testnet:
+    enabled: true
+    requireApproval: false
+transactions:
+  maxSingleAmountUsd: 500
+  maxSlippageBps: 50
+  requireConfirmation: large
+allowlist:
+  solanaPrograms: []
+  tokenMints: []
+  actions: ["swap", "transfer"]
+rules: []
