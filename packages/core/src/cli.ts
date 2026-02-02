@@ -61,7 +61,10 @@ async function main() {
   }
 
   if (args[0] === "replay" && args[1] === "--dry" && args[2]) {
-    replayDry(args[2]);
+    // optional: --workflow <path>
+    const wfIdx = args.findIndex((a) => a === "--workflow");
+    const workflowPath = wfIdx !== -1 ? args[wfIdx + 1] : undefined;
+    replayDry(args[2], { workflowPath });
     return;
   }
 

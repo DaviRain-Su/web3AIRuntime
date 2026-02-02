@@ -532,7 +532,25 @@ export async function runWorkflowFromFile(workflowPath: string, opts: RunOptions
     __policy: policy,
   };
 
-  trace.emit({ ts: Date.now(), type: "run.started", runId, data: { workflow: wf.name, version: wf.version } });
+  // run metadata (helps debugging)
+  const solana = (() => {
+    try {
+      const rpcUrl = resolveSolanaRpc();
+      const network = inferNetworkFromRpcUrl(rpcUrl);
+      const kp = loadSolanaKeypair();
+      const pubkey = kp ? kp.publicKey.toBase58() : undefined;
+      return { rpcUrl, network, pubkey };
+    } catch {
+      return {} as any;
+    }
+  })();
+
+  trace.emit({
+    ts: Date.now(),
+    type: "run.started",
+    runId,
+    data: { workflow: wf.name, version: wf.version, solana },
+  });
 
   const tools = toolMap(createMockTools());
 

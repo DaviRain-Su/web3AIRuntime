@@ -124,12 +124,13 @@ function applyResultBindings(tool: string, result: any, ctx: Dict) {
   if (tool === "solana_confirm_tx") ctx.confirmed = result;
 }
 
-export function replayDry(runId: string) {
+export function replayDry(runId: string, opts: { workflowPath?: string } = {}) {
   const events = loadRunEvents(runId);
-  const wfPath = inferWorkflowPathFromRun(events);
+  const wfPath = opts.workflowPath ? resolve(process.cwd(), opts.workflowPath) : inferWorkflowPathFromRun(events);
   const wf = loadYamlFile<Workflow>(wfPath);
 
   const ctx: Dict = {};
+  const missingArtifacts: Array<{ stepId: string; tool: string }> = [];
 
   console.log(`replay --dry runId: ${runId}`);
   console.log(`workflow: ${wf.name} v${wf.version}`);
@@ -138,42 +139,52 @@ export function replayDry(runId: string) {
   for (const stage of wf.stages) {
     if (stage.when) {
       const ok = evalWhen(stage.when, ctx);
-      if (!ok) {
-        console.log(`- stage ${stage.name}: skipped (when=${stage.when})`);
-        continue;
-      }
+      console.log(`- stage ${stage.name}: when (${stage.when}) => ${ok}`);
+      if (!ok) continue;
+    } else {
+      console.log(`- stage ${stage.name}: when => true`);
     }
 
     if (stage.type === "approval" && stage.approval?.required) {
       const conditions = stage.approval?.conditions ?? [];
+      if (!conditions.length) {
+        console.log(`  - approval: required (no conditions)`);
+      } else {
+        console.log(`  - approval: required`);
+        for (const c of conditions) {
+          const ok = evalWhen(c, ctx);
+          console.log(`    - condition (${c}) => ${ok}`);
+        }
+      }
       const allOk = conditions.every((c) => evalWhen(c, ctx));
-      console.log(`- stage ${stage.name}: approval required; conditions ${allOk ? "OK" : "FAILED"}`);
       if (!allOk) throw new Error(`Approval conditions failed for stage ${stage.name}`);
-      // dry replay does not prompt
       continue;
     }
 
-    console.log(`- stage ${stage.name}: replay actions`);
-
     for (const action of stage.actions) {
-      awaitReplayAction(runId, events, stage, action, ctx);
+      const stepId = stage.name;
+      const tool = action.tool;
+      const artifactPath = findArtifact(events, tool, stepId);
+      if (!artifactPath) {
+        missingArtifacts.push({ stepId, tool });
+        console.log(`  - ${tool}: MISSING artifact`);
+        continue;
+      }
+      const result = JSON.parse(readFileSync(artifactPath, "utf-8"));
+      applyResultBindings(tool, result, ctx);
+      console.log(`  - ${tool}: loaded artifact ${artifactPath}`);
     }
   }
 
-  console.log("replay --dry: OK");
-}
-
-function awaitReplayAction(runId: string, events: TraceEvent[], stage: WorkflowStage, action: WorkflowAction, ctx: Dict) {
-  const stepId = stage.name;
-  const tool = action.tool;
-
-  const artifactPath = findArtifact(events, tool, stepId);
-  if (!artifactPath) {
-    console.log(`  - ${tool}: no artifact found (skipped)`);
-    return;
+  if (missingArtifacts.length) {
+    console.log("\nmissing artifacts:");
+    for (const m of missingArtifacts) console.log(`- step=${m.stepId} tool=${m.tool}`);
   }
 
-  const result = JSON.parse(readFileSync(artifactPath, "utf-8"));
-  applyResultBindings(tool, result, ctx);
-  console.log(`  - ${tool}: loaded artifact ${artifactPath}`);
+  console.log("\nreplay --dry: OK");
+}
+
+// deprecated helper (kept for compatibility in history)
+function awaitReplayAction(_runId: string, _events: TraceEvent[], _stage: WorkflowStage, _action: WorkflowAction, _ctx: Dict) {
+  // no-op
 }
