@@ -35,7 +35,23 @@ export class PolicyEngine {
       };
     }
 
-    // 4) basic limits
+    // 4) solana program allowlist
+    if (ctx.chain === "solana") {
+      const allowedPrograms = this.config.allowlist.solanaPrograms ?? [];
+      if (allowedPrograms.length) {
+        const used = ctx.programIds ?? [];
+        const notAllowed = used.filter((p) => !allowedPrograms.includes(p));
+        if (notAllowed.length) {
+          return {
+            decision: "block",
+            code: "PROGRAM_NOT_ALLOWED",
+            message: `Solana program not allowed: ${notAllowed[0]}`,
+          };
+        }
+      }
+    }
+
+    // 5) basic limits
     if (typeof ctx.amountUsd === "number" && ctx.amountUsd > this.config.transactions.maxSingleAmountUsd) {
       return {
         decision: "confirm",

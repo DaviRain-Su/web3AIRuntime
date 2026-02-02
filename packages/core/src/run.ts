@@ -10,8 +10,10 @@ import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 
 import {
+  AddressLookupTableAccount,
   Connection,
   Keypair,
+  PublicKey,
   VersionedTransaction,
   clusterApiUrl,
   type Commitment,
@@ -96,6 +98,33 @@ function inferNetworkFromRpcUrl(rpcUrl: string): "mainnet" | "testnet" {
   const u = rpcUrl.toLowerCase();
   if (u.includes("mainnet")) return "mainnet";
   return "testnet";
+}
+
+async function extractSolanaProgramIdsFromTxB64(txB64: string, rpcUrl: string): Promise<string[]> {
+  const raw = Buffer.from(txB64, "base64");
+  const tx = VersionedTransaction.deserialize(raw);
+
+  const conn = new Connection(rpcUrl, { commitment: "processed" as Commitment });
+
+  // Resolve address lookup tables (ALT) so we can map programIdIndex correctly.
+  const lookups = tx.message.addressTableLookups ?? [];
+  const altAccounts: AddressLookupTableAccount[] = [];
+
+  for (const l of lookups) {
+    const key = new PublicKey(l.accountKey);
+    const res = await conn.getAddressLookupTable(key);
+    if (res.value) altAccounts.push(res.value);
+  }
+
+  const keys = tx.message.getAccountKeys({ addressLookupTableAccounts: altAccounts });
+
+  const programIds = new Set<string>();
+  for (const ix of tx.message.compiledInstructions) {
+    const pk = keys.get(ix.programIdIndex);
+    if (pk) programIds.add(pk.toBase58());
+  }
+
+  return [...programIds];
 }
 
 function defaultW3rtDir() {
@@ -446,12 +475,23 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
       const rpc = t.meta.chain === "solana" ? resolveSolanaRpc() : "";
       const network = t.meta.chain === "solana" ? inferNetworkFromRpcUrl(rpc) : "mainnet";
 
+      let programIds: string[] | undefined;
+      if (t.meta.chain === "solana" && typeof (params as any).txB64 === "string") {
+        try {
+          programIds = await extractSolanaProgramIdsFromTxB64((params as any).txB64, resolveSolanaRpc());
+        } catch (e) {
+          // If we fail to resolve ALTs, we prefer to be conservative in policy:
+          // leave programIds undefined and let allowlist (if set) potentially block.
+        }
+      }
+
       const decision = engine.decide({
         chain: t.meta.chain ?? "unknown",
         network,
         action: t.meta.action,
         sideEffect: t.meta.sideEffect,
         simulationOk: ctx.simulation?.ok === true,
+        programIds,
         amountUsd: ctx.opportunity?.profit ? Number(ctx.opportunity.profit) * 10 : undefined,
       });
 
