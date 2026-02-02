@@ -7,6 +7,7 @@ import readline from "node:readline";
 import { runWorkflowFromFile } from "./run.js";
 import { printRunTrace } from "./trace_cmd.js";
 import { replayDry } from "./replay_cmd.js";
+import { policySuggestFromRun } from "./policy_cmd.js";
 
 function confirm(prompt: string): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -23,7 +24,7 @@ async function main() {
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "help") {
     console.log(
-      "w3rt - Web3 AI Runtime (scaffold)\n\nCommands:\n  w3rt run <workflow.yml>\n  w3rt trace <runId>\n  w3rt replay --dry <runId>\n  w3rt policy show\n"
+      "w3rt - Web3 AI Runtime (scaffold)\n\nCommands:\n  w3rt run <workflow.yml>\n  w3rt trace <runId>\n  w3rt replay --dry <runId>\n  w3rt policy show\n  w3rt policy suggest --from-run <runId>\n"
     );
     process.exit(0);
   }
@@ -36,6 +37,11 @@ async function main() {
       console.error("No policy.yaml found at .w3rt/policy.yaml");
       process.exit(1);
     }
+    return;
+  }
+
+  if (args[0] === "policy" && args[1] === "suggest" && args[2] === "--from-run" && args[3]) {
+    policySuggestFromRun(args[3]);
     return;
   }
 

@@ -495,7 +495,14 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         amountUsd: ctx.opportunity?.profit ? Number(ctx.opportunity.profit) * 10 : undefined,
       });
 
-      trace.emit({ ts: Date.now(), type: "policy.decision", runId, stepId, tool: t.name, data: decision as any });
+      trace.emit({
+        ts: Date.now(),
+        type: "policy.decision",
+        runId,
+        stepId,
+        tool: t.name,
+        data: { ...(decision as any), ...(programIds ? { programIds } : {}) },
+      });
 
       if (decision.decision === "block") throw new Error(`Policy blocked: ${decision.code}`);
       if (decision.decision === "confirm") {
