@@ -1,0 +1,13 @@
+name: solana_balance
+version: "0.1"
+description: Get wallet balance (SOL + optional mint)
+trigger: manual
+stages:
+  - name: balance
+    type: analysis
+    actions:
+      - tool: solana_balance
+        params:
+          # address: "<optional pubkey>"
+          # tokenMint: "<optional mint>"  # e.g. USDC mint
+          includeTokens: true

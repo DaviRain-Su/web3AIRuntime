@@ -336,7 +336,64 @@ function createMockTools(): Tool[] {
       },
     },
 
-    // ----- solana/jupiter mock tools (used by solana_swap_exact_in.yaml)
+    // ----- solana tools
+    {
+      name: "solana_balance",
+      meta: { action: "balance", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        const rpc = resolveSolanaRpc();
+        const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
+
+        const address = params.address
+          ? new PublicKey(String(params.address))
+          : (loadSolanaKeypair()?.publicKey ?? null);
+
+        if (!address) {
+          throw new Error(
+            "Missing Solana address. Provide params.address or configure Solana CLI keypair."
+          );
+        }
+
+        const lamports = await conn.getBalance(address, "confirmed");
+        const sol = lamports / 1_000_000_000;
+
+        const out: any = {
+          ok: true,
+          address: address.toBase58(),
+          sol: { lamports, sol },
+        };
+
+        const includeTokens = params.includeTokens === true;
+        const tokenMint = params.tokenMint ? String(params.tokenMint) : undefined;
+        if (includeTokens) {
+          const tokenProgram = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+          if (tokenMint) {
+            const mint = new PublicKey(tokenMint);
+            const res = await conn.getParsedTokenAccountsByOwner(address, { mint });
+            out.tokens = res.value.map((v) => ({
+              pubkey: v.pubkey.toBase58(),
+              mint: v.account.data.parsed.info.mint,
+              amount: v.account.data.parsed.info.tokenAmount.amount,
+              decimals: v.account.data.parsed.info.tokenAmount.decimals,
+              uiAmount: v.account.data.parsed.info.tokenAmount.uiAmount,
+            }));
+          } else {
+            const res = await conn.getParsedTokenAccountsByOwner(address, { programId: tokenProgram });
+            out.tokens = res.value.map((v) => ({
+              pubkey: v.pubkey.toBase58(),
+              mint: v.account.data.parsed.info.mint,
+              amount: v.account.data.parsed.info.tokenAmount.amount,
+              decimals: v.account.data.parsed.info.tokenAmount.decimals,
+              uiAmount: v.account.data.parsed.info.tokenAmount.uiAmount,
+            }));
+          }
+        }
+
+        return out;
+      },
+    },
+
+  // ----- solana/jupiter tools (used by solana_swap_exact_in.yaml)
     {
       name: "solana_jupiter_quote",
       meta: { action: "quote", sideEffect: "none", chain: "solana", risk: "low" },
@@ -587,6 +644,9 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
 
     // Persist large artifacts for audit/replay (MVP)
     const artifactRefs = [] as any[];
+    if (t.name === "solana_balance") {
+      artifactRefs.push(trace.writeArtifact(runId, `balance_${stepId}`, result));
+    }
     if (t.name === "solana_jupiter_quote") {
       artifactRefs.push(trace.writeArtifact(runId, `quote_${stepId}`, result));
     }
@@ -610,6 +670,9 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     if (t.name === "calculate_opportunity") ctx.opportunity = result;
     if (t.name === "simulate_swap") ctx.simulation = result;
     if (t.name === "swap") ctx.result = { ...(ctx.result ?? {}), ...(result ?? {}) };
+
+    // Solana bindings
+    if (t.name === "solana_balance") ctx.balance = result;
 
     // Solana swap workflow bindings
     if (t.name === "solana_jupiter_quote") ctx.quote = result;
