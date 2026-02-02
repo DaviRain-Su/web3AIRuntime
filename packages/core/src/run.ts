@@ -526,5 +526,36 @@ export async function runWorkflowFromFile(workflowPath: string, opts: RunOptions
     throw err;
   }
 
-  return { runId, ctx };
+  // Build a user-friendly summary (best-effort)
+  const networkHint = (() => {
+    try {
+      const rpc = resolveSolanaRpc();
+      return inferNetworkFromRpcUrl(rpc);
+    } catch {
+      return "unknown";
+    }
+  })();
+
+  const explorerBase = networkHint === "mainnet"
+    ? "https://solscan.io/tx/"
+    : "https://solscan.io/tx/"; // solscan auto-detects; keep simple for now
+
+  const signature = ctx.submitted?.signature || ctx.confirmed?.signature;
+
+  const summary = {
+    workflow: wf.name,
+    ok: true,
+    chain: "solana",
+    network: networkHint,
+    signature,
+    explorerUrl: signature ? `${explorerBase}${signature}` : undefined,
+    quote: ctx.quote?.quoteResponse ? {
+      inAmount: ctx.quote.quoteResponse?.inAmount,
+      outAmount: ctx.quote.quoteResponse?.outAmount,
+      inputMint: ctx.quote.quoteResponse?.inputMint,
+      outputMint: ctx.quote.quoteResponse?.outputMint,
+    } : undefined,
+  };
+
+  return { runId, ctx, summary };
 }

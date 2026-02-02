@@ -39,9 +39,17 @@ async function main() {
 
   if (args[0] === "run" && args[1]) {
     const wfPath = resolve(process.cwd(), args[1]);
-    const { runId } = await runWorkflowFromFile(wfPath, { approve: confirm });
+    const { runId, summary } = await runWorkflowFromFile(wfPath, { approve: confirm });
     console.log(`runId: ${runId}`);
     console.log(`trace: ~/.w3rt/runs/${runId}/trace.jsonl`);
+
+    if (summary?.signature) {
+      console.log(`signature: ${summary.signature}`);
+    }
+    if (summary?.explorerUrl) {
+      console.log(`explorer: ${summary.explorerUrl}`);
+    }
+
     return;
   }
 
