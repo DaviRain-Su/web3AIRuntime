@@ -1,5 +1,5 @@
 {
-  "name": "@w3rt/pi",
+  "name": "@w3rt/host-pi",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,6 +14,7 @@
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
-    "@w3rt/host-pi": "workspace:*"
+    "@w3rt/runtime": "workspace:*",
+    "js-yaml": "^4.1.0"
   }
 }

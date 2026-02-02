@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import os from "node:os";
 import yaml from "js-yaml";
 
-import { runWorkflowFromFile } from "@w3rt/core";
+import { runWorkflowFromFile } from "@w3rt/runtime";
 
 type Dict = Record<string, any>;
 

@@ -1,1 +1,1 @@
-export { default as w3rtPiExtension } from "./pi-extension.js";
+export * from "@w3rt/host-pi";

@@ -17,6 +17,32 @@
     "packages/core": {
       "name": "@w3rt/core",
       "version": "0.0.0",
+      "dependencies": {
+        "@w3rt/runtime": "workspace:*",
+      },
+    },
+    "packages/host-pi": {
+      "name": "@w3rt/host-pi",
+      "version": "0.0.0",
+      "dependencies": {
+        "@w3rt/runtime": "workspace:*",
+        "js-yaml": "^4.1.0",
+      },
+    },
+    "packages/pi": {
+      "name": "@w3rt/pi",
+      "version": "0.0.0",
+      "dependencies": {
+        "@w3rt/host-pi": "workspace:*",
+      },
+    },
+    "packages/policy": {
+      "name": "@w3rt/policy",
+      "version": "0.0.0",
+    },
+    "packages/runtime": {
+      "name": "@w3rt/runtime",
+      "version": "0.0.0",
       "bin": {
         "w3rt": "dist/cli.js",
       },
@@ -28,18 +54,6 @@
         "@w3rt/workflow": "workspace:*",
         "js-yaml": "^4.1.0",
       },
-    },
-    "packages/pi": {
-      "name": "@w3rt/pi",
-      "version": "0.0.0",
-      "dependencies": {
-        "@w3rt/core": "workspace:*",
-        "js-yaml": "^4.1.0",
-      },
-    },
-    "packages/policy": {
-      "name": "@w3rt/policy",
-      "version": "0.0.0",
     },
     "packages/trace": {
       "name": "@w3rt/trace",
@@ -83,9 +97,13 @@
 
     "@w3rt/core": ["@w3rt/core@workspace:packages/core"],
 
+    "@w3rt/host-pi": ["@w3rt/host-pi@workspace:packages/host-pi"],
+
     "@w3rt/pi": ["@w3rt/pi@workspace:packages/pi"],
 
     "@w3rt/policy": ["@w3rt/policy@workspace:packages/policy"],
+
+    "@w3rt/runtime": ["@w3rt/runtime@workspace:packages/runtime"],
 
     "@w3rt/trace": ["@w3rt/trace@workspace:packages/trace"],
 

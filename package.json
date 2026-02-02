@@ -6,11 +6,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "sh -c 'cd packages/workflow && bun run build' && sh -c 'cd packages/policy && bun run build' && sh -c 'cd packages/trace && bun run build' && sh -c 'cd packages/chains && bun run build' && sh -c 'cd packages/core && bun run build' && sh -c 'cd packages/pi && bun run build'",
+    "build": "sh -c 'cd packages/workflow && bun run build' && sh -c 'cd packages/policy && bun run build' && sh -c 'cd packages/trace && bun run build' && sh -c 'cd packages/chains && bun run build' && sh -c 'cd packages/runtime && bun run build' && sh -c 'cd packages/core && bun run build' && sh -c 'cd packages/host-pi && bun run build' && sh -c 'cd packages/pi && bun run build'",
     "test": "bun run --workspaces test",
     "lint": "bun run --workspaces lint",
 
-    "pi": "pi -e packages/pi/dist/pi-extension.js"
+    "pi": "pi -e packages/host-pi/dist/pi-extension.js"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

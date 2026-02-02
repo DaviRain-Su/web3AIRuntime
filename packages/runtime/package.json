@@ -1,5 +1,5 @@
 {
-  "name": "@w3rt/pi",
+  "name": "@w3rt/runtime",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,12 +8,20 @@
   "exports": {
     ".": "./dist/index.js"
   },
+  "bin": {
+    "w3rt": "dist/cli.js"
+  },
   "scripts": {
     "build": "bunx tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
-    "@w3rt/host-pi": "workspace:*"
+    "@solana/web3.js": "^1.98.4",
+    "@w3rt/chains": "workspace:*",
+    "@w3rt/policy": "workspace:*",
+    "@w3rt/trace": "workspace:*",
+    "@w3rt/workflow": "workspace:*",
+    "js-yaml": "^4.1.0"
   }
 }

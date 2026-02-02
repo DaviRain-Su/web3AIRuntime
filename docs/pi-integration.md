@@ -14,7 +14,7 @@ bun run build
 From repo root:
 
 ```bash
-pi -e packages/pi/dist/pi-extension.js
+pi -e packages/host-pi/dist/pi-extension.js
 ```
 
 Or:
