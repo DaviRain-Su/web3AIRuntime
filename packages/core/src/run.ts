@@ -475,11 +475,17 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
       artifactRefs.push(trace.writeArtifact(runId, `quote_${stepId}`, result));
     }
     if (t.name === "solana_jupiter_build_tx") {
-      // Save both the tx and the quoteId link
-      artifactRefs.push(trace.writeArtifact(runId, `built_${stepId}`, { quoteId: result?.quoteId, txB64: result?.txB64 }));
+      // Save full Jupiter swap build response for audit/replay
+      artifactRefs.push(trace.writeArtifact(runId, `built_${stepId}`, result));
     }
     if (t.name === "solana_simulate_tx") {
       artifactRefs.push(trace.writeArtifact(runId, `simulation_${stepId}`, result));
+    }
+    if (t.name === "solana_send_tx") {
+      artifactRefs.push(trace.writeArtifact(runId, `submitted_${stepId}`, result));
+    }
+    if (t.name === "solana_confirm_tx") {
+      artifactRefs.push(trace.writeArtifact(runId, `confirmed_${stepId}`, result));
     }
 
     trace.emit({ ts: Date.now(), type: "tool.result", runId, stepId, tool: t.name, data: { result }, artifactRefs: artifactRefs.length ? artifactRefs : undefined });
