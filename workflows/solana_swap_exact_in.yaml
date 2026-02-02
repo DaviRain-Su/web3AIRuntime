@@ -1,0 +1,49 @@
+name: solana_swap_exact_in
+version: "0.1"
+description: Jupiter swap exact-in (mock for now)
+trigger: manual
+stages:
+  - name: quote
+    type: analysis
+    actions:
+      - tool: solana_jupiter_quote
+        params:
+          inputMint: "So11111111111111111111111111111111111111112"   # SOL (wrapped)
+          outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" # USDC
+          amount: "10000000" # 0.01 SOL in lamports
+          slippageBps: 50
+
+  - name: build
+    type: simulation
+    actions:
+      - tool: solana_jupiter_build_tx
+        params:
+          quoteId: "{{ quote.quoteId }}"
+
+  - name: simulate
+    type: simulation
+    actions:
+      - tool: solana_simulate_tx
+        params:
+          txB64: "{{ built.txB64 }}"
+
+  - name: approve
+    type: approval
+    approval:
+      required: true
+      conditions:
+        - "simulation.ok == true"
+
+  - name: execute
+    type: execution
+    actions:
+      - tool: solana_send_tx
+        params:
+          txB64: "{{ built.txB64 }}"
+
+  - name: confirm
+    type: monitor
+    actions:
+      - tool: solana_confirm_tx
+        params:
+          signature: "{{ submitted.signature }}"

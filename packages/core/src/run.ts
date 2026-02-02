@@ -90,6 +90,7 @@ interface Tool {
 
 function createMockTools(): Tool[] {
   return [
+    // ----- generic mock tools (used by mock-arb.yaml)
     {
       name: "price_check",
       meta: { action: "price_check", sideEffect: "none", risk: "low" },
@@ -165,6 +166,66 @@ function createMockTools(): Tool[] {
       meta: { action: "notify", sideEffect: "none", risk: "low" },
       async execute(params) {
         return { ok: true, message: params.message };
+      },
+    },
+
+    // ----- solana/jupiter mock tools (used by solana_swap_exact_in.yaml)
+    {
+      name: "solana_jupiter_quote",
+      meta: { action: "quote", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        return {
+          ok: true,
+          quoteId: "q_" + crypto.randomBytes(4).toString("hex"),
+          inputMint: params.inputMint,
+          outputMint: params.outputMint,
+          amount: params.amount,
+          slippageBps: params.slippageBps,
+          outAmount: "1999000",
+        };
+      },
+    },
+    {
+      name: "solana_jupiter_build_tx",
+      meta: { action: "build_tx", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        return {
+          ok: true,
+          quoteId: params.quoteId,
+          txB64: Buffer.from("MOCK_SOLANA_TX").toString("base64"),
+        };
+      },
+    },
+    {
+      name: "solana_simulate_tx",
+      meta: { action: "simulate", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        return {
+          ok: true,
+          txB64: params.txB64,
+          unitsConsumed: 123456,
+        };
+      },
+    },
+    {
+      name: "solana_send_tx",
+      meta: { action: "swap", sideEffect: "broadcast", chain: "solana", risk: "high" },
+      async execute() {
+        return {
+          ok: true,
+          signature: "mock_sig_" + crypto.randomBytes(8).toString("hex"),
+        };
+      },
+    },
+    {
+      name: "solana_confirm_tx",
+      meta: { action: "confirm", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        return {
+          ok: true,
+          signature: params.signature,
+          slot: 999,
+        };
       },
     },
   ];
@@ -244,6 +305,13 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     if (t.name === "calculate_opportunity") ctx.opportunity = result;
     if (t.name === "simulate_swap") ctx.simulation = result;
     if (t.name === "swap") ctx.result = { ...(ctx.result ?? {}), ...(result ?? {}) };
+
+    // Solana swap workflow bindings
+    if (t.name === "solana_jupiter_quote") ctx.quote = result;
+    if (t.name === "solana_jupiter_build_tx") ctx.built = result;
+    if (t.name === "solana_simulate_tx") ctx.simulation = result;
+    if (t.name === "solana_send_tx") ctx.submitted = result;
+    if (t.name === "solana_confirm_tx") ctx.confirmed = result;
 
     return result;
   } catch (err: any) {
