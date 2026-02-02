@@ -24,7 +24,7 @@ export interface RunOptions {
 
 type Dict = Record<string, any>;
 
-type SolanaCluster = "mainnet-beta" | "devnet";
+type SolanaCluster = "mainnet-beta" | "testnet" | "devnet";
 
 function getSolanaCluster(): SolanaCluster {
   return (process.env.W3RT_SOLANA_CLUSTER as SolanaCluster) || "devnet";
@@ -34,18 +34,53 @@ function solanaRpcUrl(cluster: SolanaCluster) {
   return process.env.W3RT_SOLANA_RPC_URL || clusterApiUrl(cluster);
 }
 
-function loadSolanaKeypair(): Keypair | null {
-  // MVP: env-based key loading.
-  // Expected format: JSON array of 64 bytes (like Solana CLI exports).
-  const raw = process.env.W3RT_SOLANA_PRIVATE_KEY;
-  if (!raw) return null;
+function loadSolanaCliConfig(): { rpcUrl?: string; keypairPath?: string } {
   try {
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return null;
-    return Keypair.fromSecretKey(Uint8Array.from(arr));
+    const p = join(os.homedir(), ".config", "solana", "cli", "config.yml");
+    const cfg = loadYamlFile<any>(p);
+    return { rpcUrl: cfg?.json_rpc_url, keypairPath: cfg?.keypair_path };
   } catch {
-    return null;
+    return {};
   }
+}
+
+function loadSolanaKeypair(): Keypair | null {
+  // Priority:
+  // 1) W3RT_SOLANA_PRIVATE_KEY (JSON array)
+  // 2) W3RT_SOLANA_KEYPAIR_PATH (file)
+  // 3) Solana CLI config.yml -> keypair_path
+
+  const raw = process.env.W3RT_SOLANA_PRIVATE_KEY;
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return Keypair.fromSecretKey(Uint8Array.from(arr));
+    } catch {
+      // fall through
+    }
+  }
+
+  const kpPath = process.env.W3RT_SOLANA_KEYPAIR_PATH || loadSolanaCliConfig().keypairPath;
+  if (kpPath) {
+    try {
+      const arr = JSON.parse(readFileSync(kpPath, "utf-8"));
+      if (Array.isArray(arr)) return Keypair.fromSecretKey(Uint8Array.from(arr));
+    } catch {
+      // fall through
+    }
+  }
+
+  return null;
+}
+
+function resolveSolanaRpc(): string {
+  if (process.env.W3RT_SOLANA_RPC_URL) return process.env.W3RT_SOLANA_RPC_URL;
+
+  // If user has Solana CLI configured, respect it.
+  const cli = loadSolanaCliConfig();
+  if (cli.rpcUrl) return cli.rpcUrl;
+
+  return solanaRpcUrl(getSolanaCluster());
 }
 
 function defaultW3rtDir() {
@@ -262,8 +297,7 @@ function createMockTools(): Tool[] {
       name: "solana_simulate_tx",
       meta: { action: "simulate", sideEffect: "none", chain: "solana", risk: "low" },
       async execute(params) {
-        const cluster = getSolanaCluster();
-        const rpc = solanaRpcUrl(cluster);
+        const rpc = resolveSolanaRpc();
         const conn = new Connection(rpc, { commitment: "processed" as Commitment });
 
         const raw = Buffer.from(String(params.txB64), "base64");
@@ -293,12 +327,11 @@ function createMockTools(): Tool[] {
         const kp = loadSolanaKeypair();
         if (!kp) {
           throw new Error(
-            "Missing W3RT_SOLANA_PRIVATE_KEY (JSON array). Needed to sign+broadcast on Solana"
+            "Missing Solana keypair. Set W3RT_SOLANA_PRIVATE_KEY, or W3RT_SOLANA_KEYPAIR_PATH, or configure Solana CLI (solana config set --keypair ...)"
           );
         }
 
-        const cluster = getSolanaCluster();
-        const rpc = solanaRpcUrl(cluster);
+        const rpc = resolveSolanaRpc();
         const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
 
         const raw = Buffer.from(String(params.txB64), "base64");
@@ -313,8 +346,7 @@ function createMockTools(): Tool[] {
       name: "solana_confirm_tx",
       meta: { action: "confirm", sideEffect: "none", chain: "solana", risk: "low" },
       async execute(params) {
-        const cluster = getSolanaCluster();
-        const rpc = solanaRpcUrl(cluster);
+        const rpc = resolveSolanaRpc();
         const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
 
         const sig = String(params.signature);
