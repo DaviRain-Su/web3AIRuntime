@@ -30,6 +30,15 @@ function getSolanaCluster(): SolanaCluster {
   return (process.env.W3RT_SOLANA_CLUSTER as SolanaCluster) || "devnet";
 }
 
+function getJupiterBaseUrl(): string {
+  // New Jupiter endpoints are under https://api.jup.ag
+  return process.env.W3RT_JUPITER_BASE_URL || "https://api.jup.ag";
+}
+
+function getJupiterApiKey(): string | undefined {
+  return process.env.W3RT_JUPITER_API_KEY;
+}
+
 function solanaRpcUrl(cluster: SolanaCluster) {
   return process.env.W3RT_SOLANA_RPC_URL || clusterApiUrl(cluster);
 }
@@ -247,14 +256,18 @@ function createMockTools(): Tool[] {
       name: "solana_jupiter_quote",
       meta: { action: "quote", sideEffect: "none", chain: "solana", risk: "low" },
       async execute(params, ctx) {
-        // Real Jupiter quote (works for devnet too; route quality differs)
-        const url = new URL("https://quote-api.jup.ag/v6/quote");
+        // Jupiter quote
+        const base = getJupiterBaseUrl();
+        const url = new URL("/swap/v1/quote", base);
         url.searchParams.set("inputMint", String(params.inputMint));
         url.searchParams.set("outputMint", String(params.outputMint));
         url.searchParams.set("amount", String(params.amount));
         if (params.slippageBps != null) url.searchParams.set("slippageBps", String(params.slippageBps));
 
-        const res = await fetch(url);
+        const apiKey = getJupiterApiKey();
+        const res = await fetch(url, {
+          headers: apiKey ? { "x-api-key": apiKey } : undefined,
+        });
         if (!res.ok) throw new Error(`Jupiter quote failed: ${res.status} ${await res.text()}`);
         const quoteResponse = await res.json();
 
@@ -285,9 +298,15 @@ function createMockTools(): Tool[] {
           wrapAndUnwrapSol: true,
         };
 
-        const res = await fetch("https://quote-api.jup.ag/v6/swap", {
+        const base = getJupiterBaseUrl();
+        const apiKey = getJupiterApiKey();
+
+        const res = await fetch(new URL("/swap/v1/swap", base), {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...(apiKey ? { "x-api-key": apiKey } : {}),
+          },
           body: JSON.stringify(body),
         });
         if (!res.ok) throw new Error(`Jupiter swap build failed: ${res.status} ${await res.text()}`);
