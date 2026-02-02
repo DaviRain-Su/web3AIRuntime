@@ -83,6 +83,12 @@ function resolveSolanaRpc(): string {
   return solanaRpcUrl(getSolanaCluster());
 }
 
+function inferNetworkFromRpcUrl(rpcUrl: string): "mainnet" | "testnet" {
+  const u = rpcUrl.toLowerCase();
+  if (u.includes("mainnet")) return "mainnet";
+  return "testnet";
+}
+
 function defaultW3rtDir() {
   return join(os.homedir(), ".w3rt");
 }
@@ -417,13 +423,21 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
   if (t.meta.sideEffect === "broadcast") {
     const engine = ctx.__policy as PolicyEngine | undefined;
     if (engine) {
+      // For now, infer network from Solana RPC if this is a Solana tool.
+      const rpc = t.meta.chain === "solana" ? resolveSolanaRpc() : "";
+      const network = t.meta.chain === "solana" ? inferNetworkFromRpcUrl(rpc) : "mainnet";
+
       const decision = engine.decide({
         chain: t.meta.chain ?? "unknown",
-        network: "mainnet",
+        network,
         action: t.meta.action,
+        sideEffect: t.meta.sideEffect,
+        simulationOk: ctx.simulation?.ok === true,
         amountUsd: ctx.opportunity?.profit ? Number(ctx.opportunity.profit) * 10 : undefined,
       });
+
       trace.emit({ ts: Date.now(), type: "policy.decision", runId, stepId, tool: t.name, data: decision as any });
+
       if (decision.decision === "block") throw new Error(`Policy blocked: ${decision.code}`);
       if (decision.decision === "confirm") {
         const approveFn = ctx.__approve as RunOptions["approve"] | undefined;

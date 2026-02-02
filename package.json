@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --workspaces build",
+    "build": "sh -c 'cd packages/workflow && bun run build' && sh -c 'cd packages/policy && bun run build' && sh -c 'cd packages/trace && bun run build' && sh -c 'cd packages/chains && bun run build' && sh -c 'cd packages/core && bun run build'",
     "test": "bun run --workspaces test",
     "lint": "bun run --workspaces lint"
   },

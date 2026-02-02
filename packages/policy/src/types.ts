@@ -48,6 +48,11 @@ export interface PolicyContext {
   chain: string;
   network: NetworkName;
   action: string;
+  sideEffect?: "none" | "broadcast";
+
+  // Simulation gate: whether we have a successful simulation artifact for the tx.
+  simulationOk?: boolean;
+
   amountUsd?: number;
   slippageBps?: number;
   programIds?: string[];

@@ -11,7 +11,21 @@ export class PolicyEngine {
       }
     }
 
-    // 2) allowlist by action
+    // 2) mainnet simulation hard gate (for side-effect actions)
+    if (
+      ctx.network === "mainnet" &&
+      this.config.networks.mainnet.requireSimulation &&
+      ctx.sideEffect === "broadcast" &&
+      ctx.simulationOk !== true
+    ) {
+      return {
+        decision: "block",
+        code: "SIMULATION_REQUIRED",
+        message: "Simulation required before broadcasting on mainnet",
+      };
+    }
+
+    // 3) allowlist by action
     const allowedActions = this.config.allowlist.actions ?? [];
     if (allowedActions.length && !allowedActions.includes(ctx.action)) {
       return {
@@ -21,7 +35,7 @@ export class PolicyEngine {
       };
     }
 
-    // 3) basic limits
+    // 4) basic limits
     if (typeof ctx.amountUsd === "number" && ctx.amountUsd > this.config.transactions.maxSingleAmountUsd) {
       return {
         decision: "confirm",
