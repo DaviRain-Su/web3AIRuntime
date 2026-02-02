@@ -12,8 +12,8 @@
     "w3rt": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "node --test",
+    "build": "bunx tsc -p tsconfig.json",
+    "test": "bun test",
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
