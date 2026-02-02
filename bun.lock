@@ -29,6 +29,14 @@
         "js-yaml": "^4.1.0",
       },
     },
+    "packages/pi": {
+      "name": "@w3rt/pi",
+      "version": "0.0.0",
+      "dependencies": {
+        "@w3rt/core": "workspace:*",
+        "js-yaml": "^4.1.0",
+      },
+    },
     "packages/policy": {
       "name": "@w3rt/policy",
       "version": "0.0.0",
@@ -74,6 +82,8 @@
     "@w3rt/chains": ["@w3rt/chains@workspace:packages/chains"],
 
     "@w3rt/core": ["@w3rt/core@workspace:packages/core"],
+
+    "@w3rt/pi": ["@w3rt/pi@workspace:packages/pi"],
 
     "@w3rt/policy": ["@w3rt/policy@workspace:packages/policy"],
 
