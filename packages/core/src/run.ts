@@ -468,7 +468,21 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
 
   try {
     const result = await t.execute(params, ctx);
-    trace.emit({ ts: Date.now(), type: "tool.result", runId, stepId, tool: t.name, data: { result } });
+
+    // Persist large artifacts for audit/replay (MVP)
+    const artifactRefs = [] as any[];
+    if (t.name === "solana_jupiter_quote") {
+      artifactRefs.push(trace.writeArtifact(runId, `quote_${stepId}`, result));
+    }
+    if (t.name === "solana_jupiter_build_tx") {
+      // Save both the tx and the quoteId link
+      artifactRefs.push(trace.writeArtifact(runId, `built_${stepId}`, { quoteId: result?.quoteId, txB64: result?.txB64 }));
+    }
+    if (t.name === "solana_simulate_tx") {
+      artifactRefs.push(trace.writeArtifact(runId, `simulation_${stepId}`, result));
+    }
+
+    trace.emit({ ts: Date.now(), type: "tool.result", runId, stepId, tool: t.name, data: { result }, artifactRefs: artifactRefs.length ? artifactRefs : undefined });
 
     // Convention: store key results for templating
     if (t.name === "calculate_opportunity") ctx.opportunity = result;

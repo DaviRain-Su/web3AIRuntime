@@ -23,6 +23,7 @@ export interface TraceEvent {
   walletId?: string;
   tool?: string;
   data?: Record<string, unknown>;
+  artifactRefs?: ArtifactRef[];
 }
 
 export interface ArtifactRef {
