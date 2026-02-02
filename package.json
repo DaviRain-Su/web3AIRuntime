@@ -6,9 +6,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm --workspaces run build",
-    "test": "npm --workspaces run test",
-    "lint": "npm --workspaces run lint"
+    "build": "bun run --workspaces build",
+    "test": "bun run --workspaces test",
+    "lint": "bun run --workspaces lint"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

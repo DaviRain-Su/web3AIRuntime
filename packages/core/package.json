@@ -17,10 +17,10 @@
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
-    "@w3rt/chains": "file:../chains",
-    "@w3rt/policy": "file:../policy",
-    "@w3rt/trace": "file:../trace",
-    "@w3rt/workflow": "file:../workflow",
+    "@w3rt/chains": "workspace:*",
+    "@w3rt/policy": "workspace:*",
+    "@w3rt/trace": "workspace:*",
+    "@w3rt/workflow": "workspace:*",
     "js-yaml": "^4.1.0"
   }
 }

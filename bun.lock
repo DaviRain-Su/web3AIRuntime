@@ -1,0 +1,67 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "web3-ai-runtime",
+      "devDependencies": {
+        "@types/js-yaml": "^4.0.9",
+        "@types/node": "^22.10.0",
+        "typescript": "^5.4.5",
+      },
+    },
+    "packages/chains": {
+      "name": "@w3rt/chains",
+      "version": "0.0.0",
+    },
+    "packages/core": {
+      "name": "@w3rt/core",
+      "version": "0.0.0",
+      "bin": {
+        "w3rt": "dist/cli.js",
+      },
+      "dependencies": {
+        "@w3rt/chains": "workspace:*",
+        "@w3rt/policy": "workspace:*",
+        "@w3rt/trace": "workspace:*",
+        "@w3rt/workflow": "workspace:*",
+        "js-yaml": "^4.1.0",
+      },
+    },
+    "packages/policy": {
+      "name": "@w3rt/policy",
+      "version": "0.0.0",
+    },
+    "packages/trace": {
+      "name": "@w3rt/trace",
+      "version": "0.0.0",
+    },
+    "packages/workflow": {
+      "name": "@w3rt/workflow",
+      "version": "0.0.0",
+    },
+  },
+  "packages": {
+    "@types/js-yaml": ["@types/js-yaml@4.0.9", "", {}, "sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg=="],
+
+    "@types/node": ["@types/node@22.19.7", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-MciR4AKGHWl7xwxkBa6xUGxQJ4VBOmPTF7sL+iGzuahOFaO0jHCsuEfS80pan1ef4gWId1oWOweIhrDEYLuaOw=="],
+
+    "@w3rt/chains": ["@w3rt/chains@workspace:packages/chains"],
+
+    "@w3rt/core": ["@w3rt/core@workspace:packages/core"],
+
+    "@w3rt/policy": ["@w3rt/policy@workspace:packages/policy"],
+
+    "@w3rt/trace": ["@w3rt/trace@workspace:packages/trace"],
+
+    "@w3rt/workflow": ["@w3rt/workflow@workspace:packages/workflow"],
+
+    "argparse": ["argparse@2.0.1", "", {}, "sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q=="],
+
+    "js-yaml": ["js-yaml@4.1.1", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.js" } }, "sha512-qQKT4zQxXl8lLwBtHMWwaTcGfFOZviOJet3Oy/xmGk2gZH677CJM9EvtfdSkgWcATZhj/55JZ0rmy3myCT5lsA=="],
+
+    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
+  }
+}
