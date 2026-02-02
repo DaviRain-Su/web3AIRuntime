@@ -11,12 +11,6 @@ function w3rtDir() {
   return process.env.W3RT_DIR || join(os.homedir(), ".w3rt");
 }
 
-function uiPrint(ctx: any, text: string) {
-  if (ctx?.ui?.print) return ctx.ui.print(text);
-  // fallback
-  console.log(text);
-}
-
 function loadTraceEvents(runId: string) {
   const p = join(w3rtDir(), "runs", runId, "trace.jsonl");
   if (!existsSync(p)) throw new Error(`No trace found for runId ${runId}. Expected: ${p}`);
@@ -127,10 +121,10 @@ export default function w3rtPiExtension(pi: any) {
   // w3rt.run <workflowPath>
   pi.registerCommand("w3rt.run", {
     description: "Run a w3rt workflow (YAML)",
-    execute: async (args: string[] = [], ctx: any) => {
-      const workflowPath = args[0];
+    handler: async (args: string, ctx: any) => {
+      const workflowPath = args?.trim();
       if (!workflowPath) {
-        ctx?.ui?.print?.("Usage: /w3rt.run <workflowPath>");
+        ctx?.ui?.notify?.("Usage: /w3rt.run <workflowPath>", "error");
         return;
       }
 
@@ -139,28 +133,28 @@ export default function w3rtPiExtension(pi: any) {
         return false;
       };
 
-      uiPrint(ctx, `running workflow: ${workflowPath}`);
+      ctx?.ui?.notify?.(`running workflow: ${workflowPath}`, "info");
 
       const { runId, summary, ctx: runCtx } = await runWorkflowFromFile(workflowPath, { approve });
 
-      uiPrint(ctx, `runId: ${runId}`);
-      if (summary?.signature) uiPrint(ctx, `signature: ${summary.signature}`);
-      if (summary?.explorerUrl) uiPrint(ctx, `explorer: ${summary.explorerUrl}`);
+      ctx?.ui?.notify?.(`runId: ${runId}`, "info");
+      if (summary?.signature) ctx?.ui?.notify?.(`signature: ${summary.signature}`, "info");
+      if (summary?.explorerUrl) ctx?.ui?.notify?.(`explorer: ${summary.explorerUrl}`, "info");
 
       // Best-effort human summary (Solana swap)
       const qr = runCtx?.quote?.quoteResponse;
       if (qr) {
         const inAmt = qr.inAmount ?? qr.amount;
         const outAmt = qr.outAmount;
-        uiPrint(ctx, `quote: in=${inAmt ?? "?"} out=${outAmt ?? "?"} slippageBps=${qr.slippageBps ?? "?"}`);
+        ctx?.ui?.notify?.(`quote: in=${inAmt ?? "?"} out=${outAmt ?? "?"} slippageBps=${qr.slippageBps ?? "?"}`, "info");
       }
       const sim = runCtx?.simulation;
       if (sim) {
-        uiPrint(ctx, `simulate: ${sim.ok ? "ok" : "failed"}${sim.unitsConsumed != null ? ` units=${sim.unitsConsumed}` : ""}`);
+        ctx?.ui?.notify?.(`simulate: ${sim.ok ? "ok" : "failed"}${sim.unitsConsumed != null ? ` units=${sim.unitsConsumed}` : ""}`, "info");
       }
 
       if (runCtx?.confirmed?.ok === true) {
-        uiPrint(ctx, "confirm: ok");
+        ctx?.ui?.notify?.("confirm: ok", "success");
       }
     },
   });
@@ -168,10 +162,10 @@ export default function w3rtPiExtension(pi: any) {
   // w3rt.trace <runId>
   pi.registerCommand("w3rt.trace", {
     description: "Show a w3rt run trace summary",
-    execute: async (args: string[] = [], ctx: any) => {
-      const runId = args[0];
+    handler: async (args: string, ctx: any) => {
+      const runId = args?.trim();
       if (!runId) {
-        uiPrint(ctx, "Usage: /w3rt.trace <runId>");
+        ctx?.ui?.notify?.("Usage: /w3rt.trace <runId>", "error");
         return;
       }
 
@@ -180,39 +174,39 @@ export default function w3rtPiExtension(pi: any) {
         const started = events.find((e) => e.type === "run.started");
         const finished = [...events].reverse().find((e) => e.type === "run.finished");
 
-        uiPrint(ctx, `runId: ${runId}`);
-        if (started?.data?.workflow) uiPrint(ctx, `workflow: ${started.data.workflow} v${started.data.version ?? ""}`);
+        ctx?.ui?.notify?.(`runId: ${runId}`, "info");
+        if (started?.data?.workflow) ctx?.ui?.notify?.(`workflow: ${started.data.workflow} v${started.data.version ?? ""}`, "info");
 
         const solana = started?.data?.solana;
         if (solana?.network || solana?.rpcUrl || solana?.pubkey) {
-          uiPrint(ctx, `solana: ${solana?.network ?? "?"}${solana?.pubkey ? ` | ${solana.pubkey}` : ""}`);
-          if (solana?.rpcUrl) uiPrint(ctx, `rpc: ${solana.rpcUrl}`);
+          ctx?.ui?.notify?.(`solana: ${solana?.network ?? "?"}${solana?.pubkey ? ` | ${solana.pubkey}` : ""}`, "info");
+          if (solana?.rpcUrl) ctx?.ui?.notify?.(`rpc: ${solana.rpcUrl}`, "info");
         }
 
         if (finished?.data) {
-          uiPrint(ctx, `status: ${finished.data.ok ? "ok" : "failed"}${finished.data.error ? ` (${finished.data.error})` : ""}`);
+          ctx?.ui?.notify?.(`status: ${finished.data.ok ? "ok" : "failed"}${finished.data.error ? ` (${finished.data.error})` : ""}`, "info");
         }
 
         const sigEv = [...events].reverse().find((e) => e.type === "tool.result" && e.tool === "solana_send_tx");
         const sig = sigEv?.data?.result?.signature;
-        if (sig) uiPrint(ctx, `signature: ${sig}`);
+        if (sig) ctx?.ui?.notify?.(`signature: ${sig}`, "info");
 
-        uiPrint(ctx, "steps:");
+        ctx?.ui?.notify?.("steps:", "info");
         for (const e of events) {
-          if (e.type === "step.started") uiPrint(ctx, `- ${e.stepId} (start)`);
-          if (e.type === "step.finished") uiPrint(ctx, `- ${e.stepId} (done)`);
+          if (e.type === "step.started") ctx?.ui?.notify?.(`- ${e.stepId} (start)`, "info");
+          if (e.type === "step.finished") ctx?.ui?.notify?.(`- ${e.stepId} (done)`, "info");
         }
 
         // show errors when failed
         if (finished?.data?.ok === false) {
           const lastErr = [...events].reverse().find((e) => e.type === "tool.error");
           if (lastErr?.tool) {
-            uiPrint(ctx, `lastErrorTool: ${lastErr.tool}`);
-            if (lastErr?.data?.error) uiPrint(ctx, `lastError: ${lastErr.data.error}`);
+            ctx?.ui?.notify?.(`lastErrorTool: ${lastErr.tool}`, "error");
+            if (lastErr?.data?.error) ctx?.ui?.notify?.(`lastError: ${lastErr.data.error}`, "error");
           }
         }
       } catch (e: any) {
-        uiPrint(ctx, String(e?.message ?? e));
+        ctx?.ui?.notify?.(String(e?.message ?? e), "error");
       }
     },
   });
@@ -220,15 +214,16 @@ export default function w3rtPiExtension(pi: any) {
   // w3rt.replay <runId> [--workflow <path>] (dry validator)
   pi.registerCommand("w3rt.replay", {
     description: "Replay a run in dry mode (validator)",
-    execute: async (args: string[] = [], ctx: any) => {
-      const runId = args[0];
+    handler: async (args: string, ctx: any) => {
+      const parts = (args ?? "").trim().split(/\s+/);
+      const runId = parts[0];
       if (!runId) {
-        uiPrint(ctx, "Usage: /w3rt.replay <runId> [--workflow <path>]");
+        ctx?.ui?.notify?.("Usage: /w3rt.replay <runId> [--workflow <path>]", "error");
         return;
       }
 
-      const wfIdx = args.findIndex((a) => a === "--workflow");
-      const workflowPath = wfIdx !== -1 ? args[wfIdx + 1] : undefined;
+      const wfIdx = parts.findIndex((a) => a === "--workflow");
+      const workflowPath = wfIdx !== -1 ? parts[wfIdx + 1] : undefined;
 
       try {
         const events = loadTraceEvents(runId);
@@ -238,24 +233,24 @@ export default function w3rtPiExtension(pi: any) {
         const ctxVars: Dict = {};
         const missing: Array<{ stepId: string; tool: string }> = [];
 
-        uiPrint(ctx, `replay --dry runId: ${runId}`);
-        uiPrint(ctx, `workflow: ${wf.name} v${wf.version}`);
-        uiPrint(ctx, `workflowPath: ${wfPath}`);
+        ctx?.ui?.notify?.(`replay --dry runId: ${runId}`, "info");
+        ctx?.ui?.notify?.(`workflow: ${wf.name} v${wf.version}`, "info");
+        ctx?.ui?.notify?.(`workflowPath: ${wfPath}`, "info");
 
         for (const stage of wf.stages ?? []) {
           if (stage.when) {
             const ok = evalWhen(stage.when, ctxVars);
-            uiPrint(ctx, `- stage ${stage.name}: when (${stage.when}) => ${ok}`);
+            ctx?.ui?.notify?.(`- stage ${stage.name}: when (${stage.when}) => ${ok}`, "info");
             if (!ok) continue;
           } else {
-            uiPrint(ctx, `- stage ${stage.name}: when => true`);
+            ctx?.ui?.notify?.(`- stage ${stage.name}: when => true`, "info");
           }
 
           if (stage.type === "approval" && stage.approval?.required) {
-            uiPrint(ctx, `  - approval: required`);
+            ctx?.ui?.notify?.(`  - approval: required`, "info");
             for (const c of stage.approval?.conditions ?? []) {
               const ok = evalWhen(c, ctxVars);
-              uiPrint(ctx, `    - condition (${c}) => ${ok}`);
+              ctx?.ui?.notify?.(`    - condition (${c}) => ${ok}`, "info");
             }
             const allOk = (stage.approval?.conditions ?? []).every((c: string) => evalWhen(c, ctxVars));
             if (!allOk) throw new Error(`Approval conditions failed for stage ${stage.name}`);
@@ -268,23 +263,23 @@ export default function w3rtPiExtension(pi: any) {
             const artifactPath = findArtifact(events, tool, stepId);
             if (!artifactPath) {
               missing.push({ stepId, tool });
-              uiPrint(ctx, `  - ${tool}: MISSING artifact`);
+              ctx?.ui?.notify?.(`  - ${tool}: MISSING artifact`, "warning");
               continue;
             }
             const result = JSON.parse(readFileSync(artifactPath, "utf-8"));
             applyBindings(tool, result, ctxVars);
-            uiPrint(ctx, `  - ${tool}: loaded artifact ${artifactPath}`);
+            ctx?.ui?.notify?.(`  - ${tool}: loaded artifact ${artifactPath}`, "info");
           }
         }
 
         if (missing.length) {
-          uiPrint(ctx, "missing artifacts:");
-          for (const m of missing) uiPrint(ctx, `- step=${m.stepId} tool=${m.tool}`);
+          ctx?.ui?.notify?.("missing artifacts:", "warning");
+          for (const m of missing) ctx?.ui?.notify?.(`- step=${m.stepId} tool=${m.tool}`, "warning");
         }
 
-        uiPrint(ctx, "replay --dry: OK");
+        ctx?.ui?.notify?.("replay --dry: OK", "success");
       } catch (e: any) {
-        uiPrint(ctx, String(e?.message ?? e));
+        ctx?.ui?.notify?.(String(e?.message ?? e), "error");
       }
     },
   });
@@ -292,10 +287,10 @@ export default function w3rtPiExtension(pi: any) {
   // w3rt.policy.suggest <runId>
   pi.registerCommand("w3rt.policy.suggest", {
     description: "Suggest Solana allowlist programs from a run",
-    execute: async (args: string[] = [], ctx: any) => {
-      const runId = args[0];
+    handler: async (args: string, ctx: any) => {
+      const runId = args?.trim();
       if (!runId) {
-        uiPrint(ctx, "Usage: /w3rt.policy.suggest <runId>");
+        ctx?.ui?.notify?.("Usage: /w3rt.policy.suggest <runId>", "error");
         return;
       }
       try {
@@ -304,15 +299,15 @@ export default function w3rtPiExtension(pi: any) {
         const programIds: string[] | undefined = dec?.data?.programIds;
 
         if (!programIds || !programIds.length) {
-          uiPrint(ctx, "No programIds found in trace policy.decision.");
+          ctx?.ui?.notify?.("No programIds found in trace policy.decision.", "warning");
           return;
         }
 
-        uiPrint(ctx, "allowlist:");
-        uiPrint(ctx, "  solanaPrograms:");
-        for (const p of programIds.sort()) uiPrint(ctx, `    - \"${p}\"`);
+        ctx?.ui?.notify?.("allowlist:", "info");
+        ctx?.ui?.notify?.("  solanaPrograms:", "info");
+        for (const p of programIds.sort()) ctx?.ui?.notify?.(`    - \"${p}\"`, "info");
       } catch (e: any) {
-        uiPrint(ctx, String(e?.message ?? e));
+        ctx?.ui?.notify?.(String(e?.message ?? e), "error");
       }
     },
   });
