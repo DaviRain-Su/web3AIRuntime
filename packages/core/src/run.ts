@@ -9,12 +9,44 @@ import type { Workflow, WorkflowStage, WorkflowAction } from "@w3rt/workflow";
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 
+import {
+  Connection,
+  Keypair,
+  VersionedTransaction,
+  clusterApiUrl,
+  type Commitment,
+} from "@solana/web3.js";
+
 export interface RunOptions {
   w3rtDir?: string;
   approve?: (prompt: string) => Promise<boolean>;
 }
 
 type Dict = Record<string, any>;
+
+type SolanaCluster = "mainnet-beta" | "devnet";
+
+function getSolanaCluster(): SolanaCluster {
+  return (process.env.W3RT_SOLANA_CLUSTER as SolanaCluster) || "devnet";
+}
+
+function solanaRpcUrl(cluster: SolanaCluster) {
+  return process.env.W3RT_SOLANA_RPC_URL || clusterApiUrl(cluster);
+}
+
+function loadSolanaKeypair(): Keypair | null {
+  // MVP: env-based key loading.
+  // Expected format: JSON array of 64 bytes (like Solana CLI exports).
+  const raw = process.env.W3RT_SOLANA_PRIVATE_KEY;
+  if (!raw) return null;
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return null;
+    return Keypair.fromSecretKey(Uint8Array.from(arr));
+  } catch {
+    return null;
+  }
+}
 
 function defaultW3rtDir() {
   return join(os.homedir(), ".w3rt");
@@ -173,59 +205,131 @@ function createMockTools(): Tool[] {
     {
       name: "solana_jupiter_quote",
       meta: { action: "quote", sideEffect: "none", chain: "solana", risk: "low" },
-      async execute(params) {
-        return {
-          ok: true,
-          quoteId: "q_" + crypto.randomBytes(4).toString("hex"),
-          inputMint: params.inputMint,
-          outputMint: params.outputMint,
-          amount: params.amount,
-          slippageBps: params.slippageBps,
-          outAmount: "1999000",
-        };
+      async execute(params, ctx) {
+        // Real Jupiter quote (works for devnet too; route quality differs)
+        const url = new URL("https://quote-api.jup.ag/v6/quote");
+        url.searchParams.set("inputMint", String(params.inputMint));
+        url.searchParams.set("outputMint", String(params.outputMint));
+        url.searchParams.set("amount", String(params.amount));
+        if (params.slippageBps != null) url.searchParams.set("slippageBps", String(params.slippageBps));
+
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Jupiter quote failed: ${res.status} ${await res.text()}`);
+        const quoteResponse = await res.json();
+
+        const quoteId = "q_" + crypto.randomBytes(6).toString("hex");
+        ctx.__jupQuotes = ctx.__jupQuotes || {};
+        ctx.__jupQuotes[quoteId] = quoteResponse;
+
+        return { ok: true, quoteId, quoteResponse };
       },
     },
     {
       name: "solana_jupiter_build_tx",
       meta: { action: "build_tx", sideEffect: "none", chain: "solana", risk: "low" },
-      async execute(params) {
-        return {
-          ok: true,
-          quoteId: params.quoteId,
-          txB64: Buffer.from("MOCK_SOLANA_TX").toString("base64"),
+      async execute(params, ctx) {
+        const kp = loadSolanaKeypair();
+        if (!kp) {
+          throw new Error(
+            "Missing W3RT_SOLANA_PRIVATE_KEY (JSON array). Needed to build a swap tx via Jupiter v6 /swap"
+          );
+        }
+
+        const quote = ctx.__jupQuotes?.[String(params.quoteId)];
+        if (!quote) throw new Error(`Unknown quoteId: ${params.quoteId}`);
+
+        const body = {
+          quoteResponse: quote,
+          userPublicKey: kp.publicKey.toBase58(),
+          wrapAndUnwrapSol: true,
         };
+
+        const res = await fetch("https://quote-api.jup.ag/v6/swap", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`Jupiter swap build failed: ${res.status} ${await res.text()}`);
+        const out = await res.json();
+
+        const txB64 = out.swapTransaction;
+        if (!txB64) throw new Error("Jupiter response missing swapTransaction");
+
+        return { ok: true, quoteId: params.quoteId, txB64 };
       },
     },
     {
       name: "solana_simulate_tx",
       meta: { action: "simulate", sideEffect: "none", chain: "solana", risk: "low" },
       async execute(params) {
+        const cluster = getSolanaCluster();
+        const rpc = solanaRpcUrl(cluster);
+        const conn = new Connection(rpc, { commitment: "processed" as Commitment });
+
+        const raw = Buffer.from(String(params.txB64), "base64");
+        const tx = VersionedTransaction.deserialize(raw);
+
+        const sim = await conn.simulateTransaction(tx, {
+          sigVerify: false,
+          replaceRecentBlockhash: true,
+          commitment: "processed",
+        });
+
+        if (sim.value.err) {
+          return { ok: false, err: sim.value.err, logs: sim.value.logs ?? [] };
+        }
+
         return {
           ok: true,
-          txB64: params.txB64,
-          unitsConsumed: 123456,
+          unitsConsumed: sim.value.unitsConsumed ?? null,
+          logs: sim.value.logs ?? [],
         };
       },
     },
     {
       name: "solana_send_tx",
       meta: { action: "swap", sideEffect: "broadcast", chain: "solana", risk: "high" },
-      async execute() {
-        return {
-          ok: true,
-          signature: "mock_sig_" + crypto.randomBytes(8).toString("hex"),
-        };
+      async execute(params) {
+        const kp = loadSolanaKeypair();
+        if (!kp) {
+          throw new Error(
+            "Missing W3RT_SOLANA_PRIVATE_KEY (JSON array). Needed to sign+broadcast on Solana"
+          );
+        }
+
+        const cluster = getSolanaCluster();
+        const rpc = solanaRpcUrl(cluster);
+        const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
+
+        const raw = Buffer.from(String(params.txB64), "base64");
+        const tx = VersionedTransaction.deserialize(raw);
+        tx.sign([kp]);
+
+        const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
+        return { ok: true, signature: sig };
       },
     },
     {
       name: "solana_confirm_tx",
       meta: { action: "confirm", sideEffect: "none", chain: "solana", risk: "low" },
       async execute(params) {
-        return {
-          ok: true,
-          signature: params.signature,
-          slot: 999,
-        };
+        const cluster = getSolanaCluster();
+        const rpc = solanaRpcUrl(cluster);
+        const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
+
+        const sig = String(params.signature);
+        const latest = await conn.getLatestBlockhash("confirmed");
+        const conf = await conn.confirmTransaction(
+          {
+            signature: sig,
+            blockhash: latest.blockhash,
+            lastValidBlockHeight: latest.lastValidBlockHeight,
+          },
+          "confirmed"
+        );
+
+        if (conf.value.err) return { ok: false, signature: sig, err: conf.value.err };
+        return { ok: true, signature: sig };
       },
     },
   ];
