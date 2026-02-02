@@ -25,6 +25,10 @@ bun run pi
 
 ## Commands inside Pi
 
+- `/w3rt <natural language>` (MVP)
+  - Examples:
+    - `换 0.01 SOL 到 U，滑点 0.5%`
+    - `swap 0.01 SOL to USDC with slippage 0.5%`
 - `/w3rt.run <workflowPath>`
   - Example: `/w3rt.run workflows/solana_swap_exact_in.yaml`
 - `/w3rt.trace <runId>`

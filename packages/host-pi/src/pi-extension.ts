@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import os from "node:os";
 import yaml from "js-yaml";
@@ -9,6 +9,83 @@ type Dict = Record<string, any>;
 
 function w3rtDir() {
   return process.env.W3RT_DIR || join(os.homedir(), ".w3rt");
+}
+
+function w3rtTmpDir() {
+  const d = join(w3rtDir(), "tmp");
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+const SOL_MINT = "So11111111111111111111111111111111111111112"; // wrapped SOL
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+
+function parseSwapIntent(text: string): {
+  ok: boolean;
+  error?: string;
+  amountSol?: number;
+  output?: "USDC" | "USDT";
+  slippageBps?: number;
+} {
+  const t = text.trim();
+
+  // slippage: "滑点 0.5%" or "slippage 0.5%" or "slippage=50bps"
+  let slippageBps: number | undefined;
+  const mSlipPct = t.match(/(?:滑点|slippage)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i);
+  if (mSlipPct) {
+    slippageBps = Math.round(Number(mSlipPct[1]) * 100);
+  }
+  const mSlipBps = t.match(/(?:滑点|slippage)\s*[:=]?\s*(\d+)\s*bps/i);
+  if (mSlipBps) {
+    slippageBps = Number(mSlipBps[1]);
+  }
+
+  // output token aliases
+  const upper = t.toUpperCase();
+  let output: "USDC" | "USDT" = "USDC"; // default: U -> USDC
+  if (/(USDT|\bTETHER\b|泰达)/i.test(t)) output = "USDT";
+  else if (/(USDC|\bUSD\s*COIN\b)/i.test(t)) output = "USDC";
+  else if (/(\bU\b|\bU币\b|\bU幣\b)/i.test(t)) output = "USDC";
+
+  // amount (first number)
+  const mAmt = t.match(/(\d+(?:\.\d+)?)/);
+  if (!mAmt) return { ok: false, error: "Missing amount (e.g. 0.01 SOL)" };
+  const amount = Number(mAmt[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "Invalid amount" };
+
+  // For MVP: assume input is SOL when user mentions SOL/sol/索拉纳
+  if (!/(\bSOL\b|索拉纳|索拉納)/i.test(t)) {
+    return { ok: false, error: "MVP only supports SOL -> USDC/USDT (please include 'SOL' in request)" };
+  }
+
+  return { ok: true, amountSol: amount, output, slippageBps };
+}
+
+function buildSolanaSwapWorkflow(params: {
+  amountSol: number;
+  outputMint: string;
+  slippageBps: number;
+}) {
+  const amountLamports = String(Math.round(params.amountSol * 1_000_000_000));
+
+  // Load template from repo workflows
+  const templatePath = resolve(process.cwd(), "workflows", "solana_swap_exact_in.yaml");
+  const wf = loadYamlFile<any>(templatePath);
+
+  // Patch quote stage params
+  const quote = wf?.stages?.find((s: any) => s?.name === "quote");
+  const act = quote?.actions?.find((a: any) => a?.tool === "solana_jupiter_quote");
+  if (!act) throw new Error("Template workflow missing solana_jupiter_quote action");
+
+  act.params = {
+    inputMint: SOL_MINT,
+    outputMint: params.outputMint,
+    amount: amountLamports,
+    slippageBps: params.slippageBps,
+  };
+
+  return wf;
 }
 
 function loadTraceEvents(runId: string) {
@@ -117,6 +194,79 @@ export default function w3rtPiExtension(pi: any) {
       // TODO: trace events for Pi-registered web3 tools
     });
   }
+
+  // w3rt <natural language>
+  // Examples:
+  // - 换 0.01 SOL 到 U，滑点 0.5%
+  // - swap 0.01 SOL to USDC with slippage 0.5%
+  pi.registerCommand("w3rt", {
+    description: "Natural language web3 actions (MVP: SOL->USDC/USDT swap)",
+    handler: async (args: string, ctx: any) => {
+      const text = (args ?? "").trim();
+      if (!text) {
+        ctx?.ui?.notify?.("Usage: /w3rt <text>", "error");
+        return;
+      }
+
+      const intent = parseSwapIntent(text);
+      if (!intent.ok) {
+        ctx?.ui?.notify?.(intent.error ?? "Unable to parse intent", "error");
+        return;
+      }
+
+      const slippageBps = intent.slippageBps ?? 50;
+      const outputMint = intent.output === "USDT" ? USDT_MINT : USDC_MINT;
+
+      // Show plan
+      ctx?.ui?.notify?.(
+        `plan: swap ${intent.amountSol} SOL -> ${intent.output} (slippage ${(slippageBps / 100).toFixed(2)}%)`,
+        "info"
+      );
+
+      const ok = ctx?.ui?.confirm
+        ? await ctx.ui.confirm("w3rt approval", "Proceed to simulate and execute?")
+        : false;
+      if (!ok) {
+        ctx?.ui?.notify?.("cancelled", "warning");
+        return;
+      }
+
+      // Generate a temp workflow and run it
+      const wf = buildSolanaSwapWorkflow({
+        amountSol: intent.amountSol!,
+        outputMint,
+        slippageBps,
+      });
+
+      const tmpPath = join(w3rtTmpDir(), `w3rt_${Date.now()}.yaml`);
+      writeFileSync(tmpPath, yaml.dump(wf), "utf-8");
+
+      const approve = async (prompt: string) => {
+        if (ctx?.ui?.confirm) return await ctx.ui.confirm("w3rt approval", prompt);
+        return false;
+      };
+
+      const { runId, summary, ctx: runCtx } = await runWorkflowFromFile(tmpPath, { approve });
+
+      ctx?.ui?.notify?.(`runId: ${runId}`, "info");
+      if (summary?.signature) ctx?.ui?.notify?.(`signature: ${summary.signature}`, "info");
+      if (summary?.explorerUrl) ctx?.ui?.notify?.(`explorer: ${summary.explorerUrl}`, "info");
+
+      const qr = runCtx?.quote?.quoteResponse;
+      if (qr) {
+        const inAmt = qr.inAmount ?? qr.amount;
+        const outAmt = qr.outAmount;
+        ctx?.ui?.notify?.(`quote: in=${inAmt ?? "?"} out=${outAmt ?? "?"} slippageBps=${qr.slippageBps ?? "?"}`, "info");
+      }
+      const sim = runCtx?.simulation;
+      if (sim) {
+        ctx?.ui?.notify?.(`simulate: ${sim.ok ? "ok" : "failed"}${sim.unitsConsumed != null ? ` units=${sim.unitsConsumed}` : ""}`, "info");
+      }
+      if (runCtx?.confirmed?.ok === true) {
+        ctx?.ui?.notify?.("confirm: ok", "success");
+      }
+    },
+  });
 
   // w3rt.run <workflowPath>
   pi.registerCommand("w3rt.run", {
