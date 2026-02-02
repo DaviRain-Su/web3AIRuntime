@@ -1,0 +1,13 @@
+name: solana_token_accounts
+version: "0.1"
+description: List SPL token accounts for a wallet
+trigger: manual
+stages:
+  - name: token_accounts
+    type: analysis
+    actions:
+      - tool: solana_token_accounts
+        params:
+          includeZero: false
+          # address: "<optional pubkey>"
+          # tokenMint: "<optional mint>"

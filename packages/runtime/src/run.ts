@@ -392,6 +392,56 @@ function createMockTools(): Tool[] {
         return out;
       },
     },
+    {
+      name: "solana_token_accounts",
+      meta: { action: "token_accounts", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        const rpc = resolveSolanaRpc();
+        const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
+
+        const owner = params.address
+          ? new PublicKey(String(params.address))
+          : (loadSolanaKeypair()?.publicKey ?? null);
+
+        if (!owner) {
+          throw new Error(
+            "Missing Solana address. Provide params.address or configure Solana CLI keypair."
+          );
+        }
+
+        const tokenMint = params.tokenMint ? String(params.tokenMint) : undefined;
+        const includeZero = params.includeZero === true;
+
+        const tokenProgram = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+        const res = tokenMint
+          ? await conn.getParsedTokenAccountsByOwner(owner, { mint: new PublicKey(tokenMint) })
+          : await conn.getParsedTokenAccountsByOwner(owner, { programId: tokenProgram });
+
+        let accounts = res.value.map((v) => {
+          const info = v.account.data.parsed.info;
+          const ta = info.tokenAmount;
+          return {
+            pubkey: v.pubkey.toBase58(),
+            mint: info.mint,
+            owner: info.owner,
+            amount: ta.amount,
+            decimals: ta.decimals,
+            uiAmount: ta.uiAmount,
+          };
+        });
+
+        if (!includeZero) {
+          accounts = accounts.filter((a) => Number(a.amount) > 0);
+        }
+
+        return {
+          ok: true,
+          owner: owner.toBase58(),
+          count: accounts.length,
+          accounts,
+        };
+      },
+    },
 
   // ----- solana/jupiter tools (used by solana_swap_exact_in.yaml)
     {
@@ -647,6 +697,9 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     if (t.name === "solana_balance") {
       artifactRefs.push(trace.writeArtifact(runId, `balance_${stepId}`, result));
     }
+    if (t.name === "solana_token_accounts") {
+      artifactRefs.push(trace.writeArtifact(runId, `token_accounts_${stepId}`, result));
+    }
     if (t.name === "solana_jupiter_quote") {
       artifactRefs.push(trace.writeArtifact(runId, `quote_${stepId}`, result));
     }
@@ -673,6 +726,7 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
 
     // Solana bindings
     if (t.name === "solana_balance") ctx.balance = result;
+    if (t.name === "solana_token_accounts") ctx.tokenAccounts = result;
 
     // Solana swap workflow bindings
     if (t.name === "solana_jupiter_quote") ctx.quote = result;
