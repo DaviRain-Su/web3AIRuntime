@@ -1,0 +1,57 @@
+name: mock_arb
+version: "0.1"
+description: Mock cross-chain arb (no real chain calls)
+trigger: manual
+stages:
+  - name: analyze
+    type: analysis
+    actions:
+      - tool: price_check
+        params:
+          tokens: [SUI, USDC]
+          chains: [sui, bnb]
+      - tool: calculate_opportunity
+        params:
+          minProfit: 10
+
+  - name: simulate
+    type: simulation
+    when: "opportunity.profit > 10"
+    actions:
+      - tool: simulate_swap
+        params:
+          chain: "{{ opportunity.sourceChain }}"
+          from: "{{ opportunity.sourceToken }}"
+          to: "{{ opportunity.targetToken }}"
+          amount: "{{ opportunity.amount }}"
+
+  - name: approve
+    type: approval
+    approval:
+      required: true
+      timeout: "2m"
+      conditions:
+        - "simulation.ok == true"
+        - "simulation.profitUsd > 50"
+
+  - name: execute
+    type: execution
+    actions:
+      - tool: swap
+        params:
+          chain: "{{ opportunity.sourceChain }}"
+          from: "{{ opportunity.sourceToken }}"
+          to: "{{ opportunity.targetToken }}"
+          amount: "{{ opportunity.amount }}"
+
+  - name: verify
+    type: monitor
+    actions:
+      - tool: verify_balance
+      - tool: notify
+        params:
+          message: "Arbitrage complete: +{{ result.profitUsd }} USDC"
+config:
+  maxRetries: 1
+  timeout: "10m"
+  rollbackOnFailure: false

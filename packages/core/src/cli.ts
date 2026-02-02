@@ -1,13 +1,28 @@
 #!/usr/bin/env node
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import readline from "node:readline";
 
-function main() {
+import { runWorkflowFromFile } from "./run.js";
+
+function confirm(prompt: string): Promise<boolean> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((res) => {
+    rl.question(`${prompt} (y/N) `, (ans: string) => {
+      rl.close();
+      res(ans.trim().toLowerCase() === "y");
+    });
+  });
+}
+
+async function main() {
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "help") {
-    console.log("w3rt - Web3 AI Runtime (scaffold)\n\nCommands:\n  w3rt run <workflow.yml>\n  w3rt policy show\n  w3rt trace <run-id>\n");
+    console.log(
+      "w3rt - Web3 AI Runtime (scaffold)\n\nCommands:\n  w3rt run <workflow.yml>\n  w3rt policy show\n"
+    );
     process.exit(0);
   }
 
@@ -22,8 +37,19 @@ function main() {
     return;
   }
 
-  console.error("Not implemented yet:", args.join(" "));
+  if (args[0] === "run" && args[1]) {
+    const wfPath = resolve(process.cwd(), args[1]);
+    const { runId } = await runWorkflowFromFile(wfPath, { approve: confirm });
+    console.log(`runId: ${runId}`);
+    console.log(`trace: ~/.w3rt/runs/${runId}/trace.jsonl`);
+    return;
+  }
+
+  console.error("Unknown command:", args.join(" "));
   process.exit(2);
 }
 
-main();
+main().catch((e) => {
+  console.error(e?.stack || String(e));
+  process.exit(1);
+});

@@ -2,13 +2,17 @@
   "name": "web3-ai-runtime",
   "private": true,
   "version": "0.0.0",
-  "packageManager": "npm@10",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "npm -ws run build",
-    "test": "npm -ws run test",
-    "lint": "npm -ws run lint"
+    "build": "npm --workspaces run build",
+    "test": "npm --workspaces run test",
+    "lint": "npm --workspaces run lint"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.4.5"
   }
 }
