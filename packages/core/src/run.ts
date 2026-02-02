@@ -100,6 +100,62 @@ function inferNetworkFromRpcUrl(rpcUrl: string): "mainnet" | "testnet" {
   return "testnet";
 }
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchJsonWithRetry(url: URL | string, opts: {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs?: number;
+  retries?: number;
+  retryDelayMs?: number;
+}): Promise<any> {
+  const {
+    method = "GET",
+    headers,
+    body,
+    timeoutMs = 10_000,
+    retries = 2,
+    retryDelayMs = 400,
+  } = opts;
+
+  let lastErr: any;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(url, { method, headers, body, signal: ctrl.signal });
+      if (res.status >= 500 && res.status < 600) {
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
+      if (!res.ok) {
+        // 4xx should not retry
+        const t = await res.text();
+        throw Object.assign(new Error(`HTTP ${res.status}: ${t}`), { noRetry: true });
+      }
+      return await res.json();
+    } catch (e: any) {
+      lastErr = e;
+      const noRetry = e?.noRetry === true;
+      const aborted = e?.name === "AbortError";
+      clearTimeout(timer);
+
+      if (attempt >= retries || noRetry) throw e;
+
+      // exponential-ish backoff
+      const wait = retryDelayMs * Math.pow(2, attempt) + (aborted ? 200 : 0);
+      await sleep(wait);
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr;
+}
+
 async function extractSolanaProgramIdsFromTxB64(txB64: string, rpcUrl: string): Promise<string[]> {
   const raw = Buffer.from(txB64, "base64");
   const tx = VersionedTransaction.deserialize(raw);
@@ -294,11 +350,17 @@ function createMockTools(): Tool[] {
         if (params.slippageBps != null) url.searchParams.set("slippageBps", String(params.slippageBps));
 
         const apiKey = getJupiterApiKey();
-        const res = await fetch(url, {
-          headers: apiKey ? { "x-api-key": apiKey } : undefined,
-        });
-        if (!res.ok) throw new Error(`Jupiter quote failed: ${res.status} ${await res.text()}`);
-        const quoteResponse = await res.json();
+        let quoteResponse: any;
+        try {
+          quoteResponse = await fetchJsonWithRetry(url, {
+            headers: apiKey ? { "x-api-key": apiKey } : undefined,
+            timeoutMs: 10_000,
+            retries: 2,
+          });
+        } catch (e: any) {
+          // preserve old error shape
+          throw new Error(`Jupiter quote failed: ${e?.message ?? String(e)}`);
+        }
 
         const quoteId = "q_" + crypto.randomBytes(6).toString("hex");
         ctx.__jupQuotes = ctx.__jupQuotes || {};
@@ -330,16 +392,21 @@ function createMockTools(): Tool[] {
         const base = getJupiterBaseUrl();
         const apiKey = getJupiterApiKey();
 
-        const res = await fetch(new URL("/swap/v1/swap", base), {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(apiKey ? { "x-api-key": apiKey } : {}),
-          },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) throw new Error(`Jupiter swap build failed: ${res.status} ${await res.text()}`);
-        const out = await res.json();
+        let out: any;
+        try {
+          out = await fetchJsonWithRetry(new URL("/swap/v1/swap", base), {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...(apiKey ? { "x-api-key": apiKey } : {}),
+            },
+            body: JSON.stringify(body),
+            timeoutMs: 15_000,
+            retries: 2,
+          });
+        } catch (e: any) {
+          throw new Error(`Jupiter swap build failed: ${e?.message ?? String(e)}`);
+        }
 
         const txB64 = out.swapTransaction;
         if (!txB64) throw new Error("Jupiter response missing swapTransaction");
