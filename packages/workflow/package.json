@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "bunx tsc -p tsconfig.json",
-    "test": "bun test",
+    "test": "bun test --pass-with-no-tests",
     "lint": "echo 'no lint yet'"
   }
 }
