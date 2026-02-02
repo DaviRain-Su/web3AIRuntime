@@ -56,5 +56,6 @@ export interface PolicyContext {
   amountUsd?: number;
   slippageBps?: number;
   programIds?: string[];
+  programIdsKnown?: boolean;
   tokenMints?: string[];
 }

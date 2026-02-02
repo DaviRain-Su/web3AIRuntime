@@ -476,12 +476,13 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
       const network = t.meta.chain === "solana" ? inferNetworkFromRpcUrl(rpc) : "mainnet";
 
       let programIds: string[] | undefined;
+      let programIdsKnown: boolean | undefined;
       if (t.meta.chain === "solana" && typeof (params as any).txB64 === "string") {
         try {
           programIds = await extractSolanaProgramIdsFromTxB64((params as any).txB64, resolveSolanaRpc());
-        } catch (e) {
-          // If we fail to resolve ALTs, we prefer to be conservative in policy:
-          // leave programIds undefined and let allowlist (if set) potentially block.
+          programIdsKnown = true;
+        } catch {
+          programIdsKnown = false;
         }
       }
 
@@ -492,6 +493,7 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         sideEffect: t.meta.sideEffect,
         simulationOk: ctx.simulation?.ok === true,
         programIds,
+        programIdsKnown,
         amountUsd: ctx.opportunity?.profit ? Number(ctx.opportunity.profit) * 10 : undefined,
       });
 

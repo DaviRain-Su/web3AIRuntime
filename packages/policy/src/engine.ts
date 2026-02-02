@@ -39,6 +39,15 @@ export class PolicyEngine {
     if (ctx.chain === "solana") {
       const allowedPrograms = this.config.allowlist.solanaPrograms ?? [];
       if (allowedPrograms.length) {
+        // Fail-closed: if we cannot determine programIds, do not broadcast.
+        if (ctx.programIdsKnown !== true) {
+          return {
+            decision: "block",
+            code: "PROGRAMS_UNKNOWN",
+            message: "Cannot determine Solana program ids for this transaction (ALT lookup failed or missing). Refusing to broadcast.",
+          };
+        }
+
         const used = ctx.programIds ?? [];
         const notAllowed = used.filter((p) => !allowedPrograms.includes(p));
         if (notAllowed.length) {
