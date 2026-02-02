@@ -6,6 +6,7 @@ import readline from "node:readline";
 
 import { runWorkflowFromFile } from "./run.js";
 import { printRunTrace } from "./trace_cmd.js";
+import { replayDry } from "./replay_cmd.js";
 
 function confirm(prompt: string): Promise<boolean> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -22,7 +23,7 @@ async function main() {
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "help") {
     console.log(
-      "w3rt - Web3 AI Runtime (scaffold)\n\nCommands:\n  w3rt run <workflow.yml>\n  w3rt trace <runId>\n  w3rt policy show\n"
+      "w3rt - Web3 AI Runtime (scaffold)\n\nCommands:\n  w3rt run <workflow.yml>\n  w3rt trace <runId>\n  w3rt replay --dry <runId>\n  w3rt policy show\n"
     );
     process.exit(0);
   }
@@ -56,6 +57,11 @@ async function main() {
 
   if (args[0] === "trace" && args[1]) {
     printRunTrace(args[1]);
+    return;
+  }
+
+  if (args[0] === "replay" && args[1] === "--dry" && args[2]) {
+    replayDry(args[2]);
     return;
   }
 
