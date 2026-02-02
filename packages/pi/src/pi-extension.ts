@@ -113,6 +113,17 @@ function findArtifact(events: any[], tool: string, stepId: string): string | nul
 export default function w3rtPiExtension(pi: any) {
   if (typeof pi?.registerCommand !== "function") return;
 
+  // Future: hook into Pi tool events so policy/trace apply to any Pi tool calls.
+  // (Our current workflow runner uses internal tools, so this is just scaffolding.)
+  if (typeof pi?.on === "function") {
+    pi.on("tool_call", async (_event: any, _ctx: any) => {
+      // TODO: policy gate for Pi-registered web3 tools
+    });
+    pi.on("tool_result", async (_event: any, _ctx: any) => {
+      // TODO: trace events for Pi-registered web3 tools
+    });
+  }
+
   // w3rt.run <workflowPath>
   pi.registerCommand("w3rt.run", {
     description: "Run a w3rt workflow (YAML)",
@@ -128,11 +139,29 @@ export default function w3rtPiExtension(pi: any) {
         return false;
       };
 
-      const { runId, summary } = await runWorkflowFromFile(workflowPath, { approve });
+      uiPrint(ctx, `running workflow: ${workflowPath}`);
 
-      ctx?.ui?.print?.(`runId: ${runId}`);
-      if (summary?.signature) ctx?.ui?.print?.(`signature: ${summary.signature}`);
-      if (summary?.explorerUrl) ctx?.ui?.print?.(`explorer: ${summary.explorerUrl}`);
+      const { runId, summary, ctx: runCtx } = await runWorkflowFromFile(workflowPath, { approve });
+
+      uiPrint(ctx, `runId: ${runId}`);
+      if (summary?.signature) uiPrint(ctx, `signature: ${summary.signature}`);
+      if (summary?.explorerUrl) uiPrint(ctx, `explorer: ${summary.explorerUrl}`);
+
+      // Best-effort human summary (Solana swap)
+      const qr = runCtx?.quote?.quoteResponse;
+      if (qr) {
+        const inAmt = qr.inAmount ?? qr.amount;
+        const outAmt = qr.outAmount;
+        uiPrint(ctx, `quote: in=${inAmt ?? "?"} out=${outAmt ?? "?"} slippageBps=${qr.slippageBps ?? "?"}`);
+      }
+      const sim = runCtx?.simulation;
+      if (sim) {
+        uiPrint(ctx, `simulate: ${sim.ok ? "ok" : "failed"}${sim.unitsConsumed != null ? ` units=${sim.unitsConsumed}` : ""}`);
+      }
+
+      if (runCtx?.confirmed?.ok === true) {
+        uiPrint(ctx, "confirm: ok");
+      }
     },
   });
 
