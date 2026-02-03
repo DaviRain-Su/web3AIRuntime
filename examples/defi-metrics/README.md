@@ -56,6 +56,27 @@ w3rt tools (planned):
 - `metrics_get` (protocol/market)
 - `metrics_list` (topN, sortBy)
 
+## SolanaYield ingest (quick data source)
+
+This example includes a minimal ingest loop that pulls from SolanaYield and upserts into Postgres every 5 minutes.
+
+It fills **tvl_usd** and leaves other fields null (volatility/utilization can be added by additional ingestors).
+
+### Run (via docker compose)
+
+```bash
+cd examples/defi-metrics
+docker compose up -d
+```
+
+### One-shot run (debug)
+
+```bash
+cd examples/defi-metrics/ingest
+npm install
+RUN_ONCE=1 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/w3rt_metrics node solana-yield-ingest.js
+```
+
 ## CocoIndex flow (placeholder)
 
 See `cocoindex/flow.py` for a placeholder flow definition.

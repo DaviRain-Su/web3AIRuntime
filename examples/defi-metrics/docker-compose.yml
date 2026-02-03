@@ -12,3 +12,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  solana_yield_ingest:
+    image: node:20
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/w3rt_metrics
+      SOLANA_YIELD_URL: https://solana-yield.vercel.app/api/yields
+      INTERVAL_MS: 300000
+    volumes:
+      - ./ingest:/app
+    command: ["bash", "-lc", "npm install --silent && node solana-yield-ingest.js"]
