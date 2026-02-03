@@ -18,6 +18,7 @@ import {
 } from "@solana/web3.js";
 
 import { SolanaDriver, EvmDriver, type ChainDriver } from "./driver/index.js";
+import { computeArtifactHash } from "./artifactHash.js";
 
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
@@ -611,6 +612,21 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             network,
           });
 
+          const artifact = {
+            chain,
+            adapter,
+            action,
+            params,
+            txB64,
+            simulation,
+            programIds,
+            policy: { decision: decision.decision },
+            traceId,
+            preparedId,
+          };
+
+          const hash = computeArtifactHash(artifact);
+
           const out = {
             ok: true,
             id,
@@ -626,6 +642,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             programIdsKnown: known,
             meta: built.meta ?? {},
             policyReport: decision,
+            hashAlg: hash.hashAlg,
+            artifactHash: hash.artifactHash,
           };
           results.push(out);
           resultById.set(id, out);
