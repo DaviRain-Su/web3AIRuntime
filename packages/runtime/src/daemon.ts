@@ -25,6 +25,65 @@ import { loadSolanaKeypair, resolveSolanaRpc } from "./run.js";
 
 type Dict = Record<string, any>;
 
+type PlanAction = {
+  id?: string;
+  dependsOn?: string[];
+  chain?: string;
+  adapter?: string;
+  action?: string;
+  params?: Dict;
+};
+
+function normalizeActions(raw: any): PlanAction[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  return arr.map((a, i) => ({
+    id: String(a?.id ?? `a${i}`),
+    dependsOn: Array.isArray(a?.dependsOn) ? a.dependsOn.map((x: any) => String(x)) : [],
+    chain: String(a?.chain ?? "solana"),
+    adapter: String(a?.adapter ?? ""),
+    action: String(a?.action ?? ""),
+    params: (a?.params ?? {}) as Dict,
+  }));
+}
+
+function topoOrderActions(actions: PlanAction[]): { ordered: PlanAction[]; cycles: string[] } {
+  const byId = new Map(actions.map((a) => [String(a.id), a]));
+  const indeg = new Map<string, number>();
+  const out = new Map<string, string[]>();
+
+  for (const a of actions) {
+    const id = String(a.id);
+    indeg.set(id, 0);
+    out.set(id, []);
+  }
+
+  for (const a of actions) {
+    const id = String(a.id);
+    for (const dep of a.dependsOn ?? []) {
+      if (!byId.has(dep)) continue; // ignore missing deps for now
+      indeg.set(id, (indeg.get(id) ?? 0) + 1);
+      out.get(dep)!.push(id);
+    }
+  }
+
+  const q: string[] = [];
+  for (const [id, d] of indeg.entries()) if (d === 0) q.push(id);
+
+  const ordered: PlanAction[] = [];
+  while (q.length) {
+    const id = q.shift()!;
+    const a = byId.get(id);
+    if (a) ordered.push(a);
+    for (const nxt of out.get(id) ?? []) {
+      indeg.set(nxt, (indeg.get(nxt) ?? 0) - 1);
+      if ((indeg.get(nxt) ?? 0) === 0) q.push(nxt);
+    }
+  }
+
+  const cycles = [...indeg.entries()].filter(([, d]) => d! > 0).map(([id]) => id);
+  return { ordered, cycles };
+}
+
 function findRepoRoot(): string {
   // Try cwd first (common when running via repo root).
   const starts = [process.cwd(), dirname(fileURLToPath(import.meta.url))];
@@ -450,6 +509,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           input: { amountUsd, stableMint, riskPreference },
           actions: [
             {
+              id: "deposit",
+              dependsOn: [],
               chain: "solana",
               adapter: "solend",
               action: "solana.solend.deposit_usdc",
@@ -465,9 +526,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       // For now: sequential compile for Solana; future: DAG execution + multi-chain drivers.
       if (req.method === "POST" && url.pathname === "/v1/plan/compile") {
         const body = await readJsonBody(req);
-        const actions = Array.isArray(body.actions) ? body.actions : [];
+        const actions = normalizeActions(body.actions ?? body.plan?.actions);
 
         if (!actions.length) return sendJson(res, 400, { ok: false, error: "MISSING_ACTIONS" });
+
+        const { ordered, cycles } = topoOrderActions(actions);
+        if (cycles.length) return sendJson(res, 400, { ok: false, error: "PLAN_CYCLE", cycles });
 
         const kp = loadSolanaKeypair();
         if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
@@ -478,17 +542,35 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
-        trace.emit({ ts: Date.now(), type: "run.started", runId: traceId, data: { mode: "plan.compile", network, count: actions.length } });
+        trace.emit({ ts: Date.now(), type: "run.started", runId: traceId, data: { mode: "plan.compile", network, count: ordered.length } });
 
         const results: any[] = [];
+        const resultById = new Map<string, any>();
 
-        for (const [idx, a] of actions.entries()) {
+        for (const [idx, a] of ordered.entries()) {
+          const id = String(a.id);
           const adapter = String(a.adapter || "");
           const action = String(a.action || "");
           const params = (a.params ?? {}) as Dict;
           const chain = String(a.chain || "solana");
+
+          // Dependency check: if any dep failed/blocked, skip compile.
+          const deps = a.dependsOn ?? [];
+          const depFailed = deps.some((d) => {
+            const r = resultById.get(String(d));
+            return r && (r.ok === false || r.allowed === false);
+          });
+          if (depFailed) {
+            const r = { ok: false, id, error: "DEP_FAILED", dependsOn: deps };
+            results.push(r);
+            resultById.set(id, r);
+            continue;
+          }
+
           if (chain !== "solana") {
-            results.push({ ok: false, error: "UNSUPPORTED_CHAIN", chain, adapter, action });
+            const r = { ok: false, id, error: "UNSUPPORTED_CHAIN", chain, adapter, action };
+            results.push(r);
+            resultById.set(id, r);
             continue;
           }
 
@@ -560,9 +642,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             network,
           });
 
-          results.push({
+          const out = {
             ok: true,
+            id,
             index: idx,
+            dependsOn: deps,
             adapter,
             action,
             preparedId,
@@ -573,14 +657,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             programIdsKnown: known,
             meta: built.meta ?? {},
             policyReport: decision,
-          });
+          };
+          results.push(out);
+          resultById.set(id, out);
 
-          trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: `compile_${idx}`, data: { ok: true, adapter, action, simulationOk: simulation.ok, policy: decision } });
+          trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: `compile_${id}`, data: { ok: true, id, adapter, action, simulationOk: simulation.ok, policy: decision } });
         }
 
         trace.emit({ ts: Date.now(), type: "run.finished", runId: traceId, data: { ok: true } });
 
-        return sendJson(res, 200, { ok: true, traceId, results });
+        return sendJson(res, 200, { ok: true, traceId, order: ordered.map((a) => a.id), results });
       }
 
       if (req.method === "POST" && url.pathname === "/v1/actions/prepare") {
