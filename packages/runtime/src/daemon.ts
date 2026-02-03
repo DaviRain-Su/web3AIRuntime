@@ -17,6 +17,8 @@ import {
   type Commitment,
 } from "@solana/web3.js";
 
+import { SolanaDriver } from "./driver/index.js";
+
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 import { TraceStore } from "@w3rt/trace";
@@ -230,36 +232,7 @@ function inferNetworkFromRpcUrl(rpcUrl: string): Prepared["network"] {
   return "unknown";
 }
 
-async function extractSolanaProgramIdsFromTxB64(txB64: string, rpcUrl: string): Promise<{ programIds: string[]; known: boolean }> {
-  try {
-    const raw = Buffer.from(txB64, "base64");
-    const tx = VersionedTransaction.deserialize(raw);
-
-    const conn = new Connection(rpcUrl, { commitment: "processed" as Commitment });
-
-    // Resolve ALTs
-    const lookups = tx.message.addressTableLookups ?? [];
-    const altAccounts: any[] = [];
-
-    for (const l of lookups) {
-      const key = new PublicKey(l.accountKey);
-      const res = await conn.getAddressLookupTable(key);
-      if (res.value) altAccounts.push(res.value);
-    }
-
-    const keys = tx.message.getAccountKeys({ addressLookupTableAccounts: altAccounts });
-
-    const programIds = new Set<string>();
-    for (const ix of tx.message.compiledInstructions) {
-      const pk = keys.get(ix.programIdIndex);
-      if (pk) programIds.add(pk.toBase58());
-    }
-
-    return { programIds: [...programIds], known: true };
-  } catch {
-    return { programIds: [], known: false };
-  }
-}
+// (moved to SolanaDriver)
 
 async function readJsonBody(req: http.IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
@@ -607,7 +580,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             simulation = { ok: false, logs: [String(e?.message ?? e)] };
           }
 
-          const { programIds, known } = await extractSolanaProgramIdsFromTxB64(txB64, rpcUrl);
+          const driver = new SolanaDriver();
+          const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
 
           const decision = policy
             ? policy.decide({
@@ -727,7 +701,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         }
 
         // program ids (best-effort)
-        const { programIds, known } = await extractSolanaProgramIdsFromTxB64(txB64, rpcUrl);
+        const driver = new SolanaDriver();
+        const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
 
         // policy
         const decision = policy
