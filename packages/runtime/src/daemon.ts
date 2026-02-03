@@ -225,6 +225,82 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, { ok: true, opportunities });
       }
 
+      // MVP: Plan a stable-yield strategy from discovery results.
+      // Returns an execution plan (action intents) that can later be compiled into workflow/transactions.
+      if (req.method === "POST" && url.pathname === "/v1/strategies/stable-yield/plan") {
+        const body = await readJsonBody(req);
+        const amountUsd = Number(body.amountUsd ?? 0);
+        const stableMint = String(body.stableMint ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        const riskPreference = String(body.risk ?? "low"); // low|medium
+        const mode = String(body.mode ?? "deposit"); // deposit|migrate
+
+        // Reuse the discovery logic (mock) for now.
+        const disc = await (async () => {
+          const opportunities = [
+            {
+              id: "solana:lending:mock-a",
+              chain: "solana",
+              stableMint,
+              name: "Lending (mock) — flexible USDC supply",
+              provider: "mock",
+              apy: 0.06,
+              tvlUsd: 50_000_000,
+              exit: { kind: "instant" },
+              risk: "low",
+              notes: "MVP placeholder. Replace with a real lending integration (e.g. Kamino/Solend).",
+              requiredActions: [
+                { adapter: "stable-yield", action: "stable_yield.deposit_usdc", params: { amountUsd } },
+              ],
+            },
+            {
+              id: "solana:vault:mock-b",
+              chain: "solana",
+              stableMint,
+              name: "Vault (mock) — auto-compound USDC",
+              provider: "mock",
+              apy: 0.075,
+              tvlUsd: 12_000_000,
+              exit: { kind: "instant" },
+              risk: "medium",
+              notes: "MVP placeholder. Replace with a real vault integration.",
+              requiredActions: [
+                { adapter: "stable-yield", action: "stable_yield.deposit_usdc", params: { amountUsd } },
+              ],
+            },
+          ];
+          opportunities.sort((a, b) => b.apy - a.apy || b.tvlUsd - a.tvlUsd);
+          return opportunities;
+        })();
+
+        // Filter by risk preference (simple): low only allows low-risk opps.
+        const candidates = riskPreference === "low" ? disc.filter((o: any) => o.risk === "low") : disc;
+        const chosen = candidates[0] ?? disc[0];
+        if (!chosen) return sendJson(res, 400, { ok: false, error: "NO_OPPORTUNITIES" });
+
+        if (mode !== "deposit") {
+          return sendJson(res, 400, {
+            ok: false,
+            error: "UNSUPPORTED_MODE",
+            message: "MVP only supports mode=deposit for now",
+          });
+        }
+
+        const planId = `plan_${crypto.randomUUID().slice(0, 16)}`;
+        const plan = {
+          id: planId,
+          kind: "stable_yield",
+          chain: "solana",
+          mode: "deposit",
+          input: { stableMint, amountUsd, riskPreference },
+          chosenOpportunity: chosen,
+          // Action intents (to be compiled). This is the "composability" layer.
+          actions: chosen.requiredActions,
+          explanation: `Pick ${chosen.name} with estimated APY ${(chosen.apy * 100).toFixed(2)}% and ${chosen.exit.kind} exit`,
+        };
+
+        return sendJson(res, 200, { ok: true, plan });
+      }
+
       if (req.method === "POST" && url.pathname === "/v1/actions/prepare") {
         const body = await readJsonBody(req);
         const chain = String(body.chain || "solana");
