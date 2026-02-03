@@ -8,9 +8,12 @@ networks:
     enabled: true
     requireApproval: false
 transactions:
-  maxSingleAmountUsd: 500
+  # conservative defaults
+  maxSingleAmountUsd: 50
   maxSlippageBps: 50
   requireConfirmation: large
+  cooldownSeconds: 60
+  maxTxPerMinute: 1
 allowlist:
   solanaPrograms: []
   tokenMints: []

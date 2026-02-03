@@ -60,7 +60,39 @@ export class PolicyEngine {
       }
     }
 
-    // 5) basic limits
+    // 5) conservative runtime rate limits (best-effort)
+    if (ctx.sideEffect === "broadcast") {
+      const cooldown = this.config.transactions.cooldownSeconds;
+      if (
+        typeof cooldown === "number" &&
+        cooldown > 0 &&
+        typeof ctx.secondsSinceLastBroadcast === "number" &&
+        ctx.secondsSinceLastBroadcast >= 0 &&
+        ctx.secondsSinceLastBroadcast < cooldown
+      ) {
+        return {
+          decision: "block",
+          code: "COOLDOWN_ACTIVE",
+          message: `Cooldown active: wait ${Math.ceil(cooldown - ctx.secondsSinceLastBroadcast)}s before broadcasting again`,
+        };
+      }
+
+      const maxPerMin = this.config.transactions.maxTxPerMinute;
+      if (
+        typeof maxPerMin === "number" &&
+        maxPerMin > 0 &&
+        typeof ctx.broadcastsLastMinute === "number" &&
+        ctx.broadcastsLastMinute >= maxPerMin
+      ) {
+        return {
+          decision: "block",
+          code: "RATE_LIMIT",
+          message: `Rate limit exceeded: ${ctx.broadcastsLastMinute} broadcasts in last minute (max ${maxPerMin})`,
+        };
+      }
+    }
+
+    // 6) basic limits
     if (typeof ctx.amountUsd === "number" && ctx.amountUsd > this.config.transactions.maxSingleAmountUsd) {
       return {
         decision: "confirm",

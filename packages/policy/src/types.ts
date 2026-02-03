@@ -19,6 +19,10 @@ export interface PolicyConfig {
     maxSingleAmountUsd: number;
     maxSlippageBps: number;
     requireConfirmation: "never" | "large" | "always";
+
+    // Conservative runtime limits (applied to broadcast actions)
+    cooldownSeconds?: number; // minimum time between broadcasts
+    maxTxPerMinute?: number; // rolling window limit
   };
   allowlist: {
     solanaPrograms?: string[];
@@ -58,4 +62,8 @@ export interface PolicyContext {
   programIds?: string[];
   programIdsKnown?: boolean;
   tokenMints?: string[];
+
+  // Rate limiting context (computed by runtime)
+  secondsSinceLastBroadcast?: number;
+  broadcastsLastMinute?: number;
 }

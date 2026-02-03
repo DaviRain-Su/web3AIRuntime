@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import yaml from "js-yaml";
@@ -168,6 +167,32 @@ function inferNetworkFromRpcUrl(rpcUrl: string): "mainnet" | "testnet" {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+type BroadcastHistoryState = {
+  timestampsMs: number[];
+};
+
+function loadBroadcastHistory(statePath: string): BroadcastHistoryState {
+  try {
+    const raw = readFileSync(statePath, "utf-8");
+    const j = JSON.parse(raw);
+    const ts = Array.isArray(j?.timestampsMs) ? j.timestampsMs.filter((n: any) => Number.isFinite(n)) : [];
+    return { timestampsMs: ts };
+  } catch {
+    return { timestampsMs: [] };
+  }
+}
+
+function saveBroadcastHistory(statePath: string, st: BroadcastHistoryState) {
+  const pruned = st.timestampsMs.filter((n) => Number.isFinite(n)).slice(-1000);
+  // best-effort
+  try {
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, JSON.stringify({ timestampsMs: pruned }, null, 2));
+  } catch {
+    // ignore
+  }
 }
 
 async function fetchJsonWithRetry(url: URL | string, opts: {
@@ -799,6 +824,15 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
       const rpc = t.meta.chain === "solana" ? resolveSolanaRpc() : "";
       const network = t.meta.chain === "solana" ? inferNetworkFromRpcUrl(rpc) : "mainnet";
 
+      // Rate limiting state (best-effort)
+      const w3rtDir = String((ctx as any).__w3rtDir || defaultW3rtDir());
+      const statePath = join(w3rtDir, "policy_broadcast_history.json");
+      const hist = loadBroadcastHistory(statePath);
+      const now = Date.now();
+      const last = hist.timestampsMs.length ? hist.timestampsMs[hist.timestampsMs.length - 1] : undefined;
+      const secondsSinceLastBroadcast = typeof last === "number" ? (now - last) / 1000 : undefined;
+      const broadcastsLastMinute = hist.timestampsMs.filter((ts) => now - ts < 60_000).length;
+
       let programIds: string[] | undefined;
       let programIdsKnown: boolean | undefined;
       if (t.meta.chain === "solana" && typeof (params as any).txB64 === "string") {
@@ -810,6 +844,24 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         }
       }
 
+      // best-effort amount/slippage context
+      const quote = ctx.quote?.quoteResponse;
+      const inMint = quote?.inputMint;
+      const inAmount = quote?.inAmount;
+      const slippageBps = typeof quote?.slippageBps === "number"
+        ? quote.slippageBps
+        : (typeof (quote?.routePlan?.[0]?.swapInfo?.slippageBps) === "number" ? quote.routePlan[0].swapInfo.slippageBps : undefined);
+
+      const USD_MINTS = new Set([
+        // mainnet USDC / USDT (common)
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+      ]);
+
+      const amountUsd = (typeof inMint === "string" && USD_MINTS.has(inMint) && typeof inAmount === "string")
+        ? Number(inAmount) / 1_000_000
+        : undefined;
+
       const decision = engine.decide({
         chain: t.meta.chain ?? "unknown",
         network,
@@ -818,7 +870,10 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         simulationOk: ctx.simulation?.ok === true,
         programIds,
         programIdsKnown,
-        amountUsd: ctx.opportunity?.profit ? Number(ctx.opportunity.profit) * 10 : undefined,
+        amountUsd,
+        slippageBps: typeof slippageBps === "number" ? slippageBps : undefined,
+        secondsSinceLastBroadcast,
+        broadcastsLastMinute,
       });
 
       trace.emit({
@@ -836,6 +891,9 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         const ok = approveFn ? await approveFn(`Policy confirm: ${decision.message}`) : false;
         if (!ok) throw new Error("Policy confirm rejected");
       }
+
+      // stash for after-send bookkeeping
+      (ctx as any).__broadcastHistory = { statePath, hist };
     }
   }
 
@@ -871,6 +929,15 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     }
 
     trace.emit({ ts: Date.now(), type: "tool.result", runId, stepId, tool: t.name, data: { result }, artifactRefs: artifactRefs.length ? artifactRefs : undefined });
+
+    // Policy bookkeeping: update broadcast history only after a successful broadcast tool runs.
+    if (t.meta.sideEffect === "broadcast" && result?.ok !== false) {
+      const bh = (ctx as any).__broadcastHistory as { statePath: string; hist: BroadcastHistoryState } | undefined;
+      if (bh?.statePath && bh?.hist) {
+        bh.hist.timestampsMs.push(Date.now());
+        saveBroadcastHistory(bh.statePath, bh.hist);
+      }
+    }
 
     // Convention: store key results for templating
     if (t.name === "calculate_opportunity") ctx.opportunity = result;
@@ -917,6 +984,7 @@ export async function runWorkflowFromFile(workflowPath: string, opts: RunOptions
   const ctx: Dict = {
     __approve: opts.approve,
     __policy: policy,
+    __w3rtDir: w3rtDir,
   };
 
   // run metadata (helps debugging)
