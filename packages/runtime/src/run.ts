@@ -7,7 +7,7 @@ import yaml from "js-yaml";
 import type { Workflow, WorkflowStage, WorkflowAction } from "@w3rt/workflow";
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
-import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
+import { defaultRegistry, jupiterAdapter } from "@w3rt/adapters";
 
 import {
   AddressLookupTableAccount,
@@ -121,7 +121,7 @@ function loadSolanaCliConfig(): { rpcUrl?: string; keypairPath?: string } {
   }
 }
 
-function loadSolanaKeypair(): Keypair | null {
+export function loadSolanaKeypair(): Keypair | null {
   // Priority:
   // 1) W3RT_SOLANA_PRIVATE_KEY (JSON array)
   // 2) W3RT_SOLANA_KEYPAIR_PATH (file)
@@ -150,7 +150,7 @@ function loadSolanaKeypair(): Keypair | null {
   return null;
 }
 
-function resolveSolanaRpc(): string {
+export function resolveSolanaRpc(): string {
   if (process.env.W3RT_SOLANA_RPC_URL) return process.env.W3RT_SOLANA_RPC_URL;
 
   // If user has Solana CLI configured, respect it.
@@ -349,7 +349,9 @@ interface Tool {
 
 function createMockTools(): Tool[] {
   // Register built-in adapters (idempotent)
-  for (const a of [jupiterAdapter, meteoraDlmmAdapter]) {
+  // NOTE: keep adapter registration minimal here.
+  // Meteora DLMM SDK currently crashes under Node v24 in this environment; register it elsewhere when supported.
+  for (const a of [jupiterAdapter]) {
     try {
       defaultRegistry.register(a);
     } catch {

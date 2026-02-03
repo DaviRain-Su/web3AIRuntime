@@ -1,9 +1,12 @@
 import { Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import { createRequire } from "node:module";
 import BN from "bn.js";
-import dlmmPkg, { StrategyType } from "@meteora-ag/dlmm";
 
-// ESM/CJS interop guard (NodeNext + mixed module exports)
-const DLMM: any = (dlmmPkg as any)?.default ?? (dlmmPkg as any);
+// Force CJS entry to avoid Node ESM directory-import issues in some deps.
+const require = createRequire(import.meta.url);
+const dlmmPkg: any = require("@meteora-ag/dlmm");
+const DLMM: any = dlmmPkg?.default ?? dlmmPkg;
+const StrategyType: any = dlmmPkg?.StrategyType;
 
 import type { Adapter, AdapterCapability, BuildTxResult } from "../types.js";
 
