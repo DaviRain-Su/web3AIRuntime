@@ -37,9 +37,8 @@ import { createSolanaTools } from "./tools/solana.js";
 import { createMetricsTools } from "./tools/metrics.js";
 import { createMeteoraTools } from "./tools/meteora.js";
 import { createEvmTools } from "./tools/evm.js";
+import { createAdapterTools } from "./tools/adapters.js";
 import type { Tool } from "./tools/types.js";
-
-import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter, zeroExAdapter } from "@w3rt/adapters";
 
 import {
   appendLearningEvent,
@@ -319,11 +318,6 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   const policyConfig = loadPolicyConfig(w3rtDir);
   const policy = new PolicyEngine(policyConfig);
 
-  // Register adapters (idempotent) so tools can route via defaultRegistry.
-  for (const a of [jupiterAdapter, meteoraDlmmAdapter, solendAdapter, zeroExAdapter]) {
-    try { defaultRegistry.register(a); } catch {}
-  }
-
   // Create tools
   const mockTools = createMockTools();
   const solanaTools = createSolanaTools({
@@ -336,8 +330,13 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   const metricsTools = createMetricsTools();
   const meteoraTools = createMeteoraTools();
   const evmTools = createEvmTools();
+  const adapterTools = createAdapterTools({
+    getSolanaUserPublicKey: () => loadSolanaKeypair()?.publicKey.toBase58() ?? null,
+    getSolanaRpcUrl: () => resolveSolanaRpc(w3rtDir),
+    getEvmUserAddress: () => String(process.env.W3RT_EVM_USER_ADDRESS || "") || null,
+  });
 
-  const allTools = [...mockTools, ...solanaTools, ...metricsTools, ...meteoraTools, ...evmTools];
+  const allTools = [...mockTools, ...solanaTools, ...metricsTools, ...meteoraTools, ...evmTools, ...adapterTools];
   const learningCtx: LearningCtx = {
     w3rtDir,
     runId,
