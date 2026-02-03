@@ -385,9 +385,17 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
           });
         } catch (e: any) {
           const inner = String(e?.message ?? e);
-          const msg = `Jupiter quote failed: ${inner}`;
           const unauthorized = inner.includes("401") || inner.toLowerCase().includes("unauthorized");
           const errorCode = unauthorized ? "JUPITER_UNAUTHORIZED" : "JUPITER_QUOTE_FAILED";
+
+          let msg = `Jupiter quote failed: ${inner}`;
+          if (unauthorized) {
+            if (!apiKey) {
+              msg = `Jupiter quote failed (401 Unauthorized). Set W3RT_JUPITER_API_KEY (or configure a fallback path). Raw: ${inner}`;
+            } else {
+              msg = `Jupiter quote failed (401 Unauthorized). Your W3RT_JUPITER_API_KEY may be invalid/expired. Raw: ${inner}`;
+            }
+          }
 
           // Fallback strategy (MVP): fail-closed unless explicitly allowed.
           // If env W3RT_ALLOW_JUPITER_FALLBACK=1, we allow returning ok:false so workflows can branch.
