@@ -8,7 +8,17 @@ async function fetchJson(url) {
   return text ? JSON.parse(text) : null;
 }
 
-export async function fetchSolendUsdcUtilizationBps(opts = {}) {
+function toBigInt(x) {
+  if (typeof x === 'bigint') return x;
+  if (typeof x === 'number') return BigInt(x);
+  if (x && typeof x.toString === 'function') {
+    const s = x.toString();
+    if (/^\d+$/.test(s)) return BigInt(s);
+  }
+  return 0n;
+}
+
+export async function fetchSolendUsdcReserveState(opts = {}) {
   const rpcUrl = opts.rpcUrl || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
   const apiHost = opts.apiHost || 'https://api.save.finance';
 
@@ -24,37 +34,30 @@ export async function fetchSolendUsdcUtilizationBps(opts = {}) {
   const acc = await conn.getAccountInfo(reservePk);
   if (!acc?.data) throw new Error('RESERVE_ACCOUNT_NOT_FOUND');
 
-  // ReserveLayout is exported by solend sdk.
   const layout = solend.ReserveLayout;
   if (!layout?.decode) throw new Error('ReserveLayout_NOT_FOUND');
   const decoded = layout.decode(acc.data);
 
-  const toBigInt = (x) => {
-    if (typeof x === 'bigint') return x;
-    if (typeof x === 'number') return BigInt(x);
-    if (x && typeof x.toString === 'function') {
-      const s = x.toString();
-      if (/^\d+$/.test(s)) return BigInt(s);
-    }
-    return 0n;
-  };
+  // flattened fields
+  const available = toBigInt(decoded?.liquidityAvailableAmount); // base units (USDC 6 decimals)
+  const borrowedWads = toBigInt(decoded?.liquidityBorrowedAmountWads); // WAD (1e18)
+  const borrowedBase = borrowedWads / 1000000000000000000n;
 
-  // ReserveLayout decode returns flattened keys (liquidityAvailableAmount / liquidityBorrowedAmountWads)
-  const avail = toBigInt(decoded?.liquidityAvailableAmount);
-  const borrowedWads = decoded?.liquidityBorrowedAmountWads;
-  const borrowed = toBigInt(borrowedWads);
-  const borrowedBase = borrowed / 1000000000000000000n;
+  // utilization = borrowed / (borrowed + available)
+  const denom = available + borrowedBase;
+  const utilization_bps = denom === 0n ? null : Number((borrowedBase * 10000n) / denom);
 
-  const denom = avail + borrowedBase;
-  if (denom === 0n) return { utilization_bps: null, reserve: reserveCfg.address };
-  const utilBps = Number((borrowedBase * 10000n) / denom);
+  // For USDC reserve, treat (available + borrowed) as TVL in base units.
+  const tvl_base = available + borrowedBase;
 
   return {
-    utilization_bps: utilBps,
-    reserve: reserveCfg.address,
-    available: avail.toString(),
-    borrowed: borrowedBase.toString(),
     rpcUrl,
     source_url: `${apiHost}/v1/markets/configs?scope=all&deployment=production`,
+    reserve: reserveCfg.address,
+    available_base: available,
+    borrowed_base: borrowedBase,
+    tvl_base,
+    utilization_bps,
+    decimals: 6,
   };
 }

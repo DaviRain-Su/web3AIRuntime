@@ -36,33 +36,36 @@ function upsertMetric(metrics, row) {
   else metrics.push(row);
 }
 
-import { fetchSolendUsdcUtilizationBps } from './solend_util.js';
+import { fetchSolendUsdcReserveState } from './solend_util.js';
 
 async function main() {
   const store = loadStore();
   const metrics = store.metrics;
   const now = new Date().toISOString();
 
-  // Solend: compute utilization from on-chain reserve state.
-  let solendUtil = null;
+  // Solend: compute utilization + TVL/liquidity (USDC reserve) from on-chain reserve state.
+  let solend = null;
   try {
-    solendUtil = await fetchSolendUsdcUtilizationBps({
+    solend = await fetchSolendUsdcReserveState({
       rpcUrl: process.env.SOLANA_RPC_URL,
       apiHost: process.env.SOLEND_API_HOST,
     });
   } catch (e) {
-    solendUtil = null;
+    solend = null;
   }
+
+  // USDC: base units -> USD by dividing 1e6
+  const toUsd = (base) => (base == null ? null : Number(base) / 1_000_000);
 
   upsertMetric(metrics, {
     chain: 'solana',
     protocol: 'solend',
     market: 'main',
-    tvl_usd: null,
-    liquidity_usd: null,
+    tvl_usd: solend?.tvl_base != null ? toUsd(solend.tvl_base) : null,
+    liquidity_usd: solend?.available_base != null ? toUsd(solend.available_base) : null,
     price_vol_5m_bps: null,
-    borrow_utilization_bps: solendUtil?.utilization_bps ?? null,
-    source_url: solendUtil?.source_url || 'https://api.save.finance/v1/markets/configs?scope=all&deployment=production',
+    borrow_utilization_bps: solend?.utilization_bps ?? null,
+    source_url: solend?.source_url || 'https://api.save.finance/v1/markets/configs?scope=all&deployment=production',
     updated_at: now,
   });
 
