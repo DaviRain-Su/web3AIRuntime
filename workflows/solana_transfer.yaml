@@ -1,0 +1,42 @@
+name: solana_transfer
+version: "0.1"
+description: Transfer SOL or SPL token
+trigger: manual
+stages:
+  - name: build
+    type: simulation
+    actions:
+      - tool: solana_build_transfer_tx
+        params:
+          to: "<DESTINATION_PUBKEY>"
+          amount: "0.01"          # SOL amount if tokenMint omitted; token ui amount if tokenMint provided
+          # tokenMint: "<OPTIONAL_MINT>"  # e.g. USDC mint
+          # createAta: true
+
+  - name: simulate
+    type: simulation
+    actions:
+      - tool: solana_simulate_tx
+        params:
+          txB64: "{{ built.txB64 }}"
+
+  - name: approve
+    type: approval
+    approval:
+      required: true
+      conditions:
+        - "simulation.ok == true"
+
+  - name: send
+    type: execution
+    actions:
+      - tool: solana_send_tx
+        params:
+          txB64: "{{ built.txB64 }}"
+
+  - name: confirm
+    type: monitor
+    actions:
+      - tool: solana_confirm_tx
+        params:
+          signature: "{{ submitted.signature }}"

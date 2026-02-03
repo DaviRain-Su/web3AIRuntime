@@ -14,10 +14,76 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemProgram,
+  TransactionInstruction,
+  TransactionMessage,
   VersionedTransaction,
   clusterApiUrl,
   type Commitment,
 } from "@solana/web3.js";
+
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+const SYSVAR_RENT_PUBKEY = new PublicKey("SysvarRent111111111111111111111111111111111");
+
+function u64LE(value: bigint): Buffer {
+  const b = Buffer.alloc(8);
+  let v = value;
+  for (let i = 0; i < 8; i++) {
+    b[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return b;
+}
+
+function getAssociatedTokenAddressSync(mint: PublicKey, owner: PublicKey): PublicKey {
+  const [ata] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  return ata;
+}
+
+function createAssociatedTokenAccountIx(params: {
+  payer: PublicKey;
+  ata: PublicKey;
+  owner: PublicKey;
+  mint: PublicKey;
+}) {
+  // Data is empty for CreateAssociatedTokenAccount
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.ata, isSigner: false, isWritable: true },
+      { pubkey: params.owner, isSigner: false, isWritable: false },
+      { pubkey: params.mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.alloc(0),
+  });
+}
+
+function createSplTransferIx(params: {
+  source: PublicKey;
+  dest: PublicKey;
+  owner: PublicKey;
+  amount: bigint;
+}) {
+  // SPL Token Transfer instruction: tag=3, amount u64
+  const data = Buffer.concat([Buffer.from([3]), u64LE(params.amount)]);
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: params.source, isSigner: false, isWritable: true },
+      { pubkey: params.dest, isSigner: false, isWritable: true },
+      { pubkey: params.owner, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+}
 
 export interface RunOptions {
   w3rtDir?: string;
@@ -442,6 +508,90 @@ function createMockTools(): Tool[] {
         };
       },
     },
+    {
+      name: "solana_build_transfer_tx",
+      meta: { action: "transfer", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params) {
+        const kp = loadSolanaKeypair();
+        if (!kp) {
+          throw new Error(
+            "Missing Solana keypair. Configure Solana CLI (solana config set --keypair ...)"
+          );
+        }
+
+        const rpc = resolveSolanaRpc();
+        const conn = new Connection(rpc, { commitment: "confirmed" as Commitment });
+
+        const to = new PublicKey(String(params.to));
+        const amountUi = Number(params.amount);
+        if (!Number.isFinite(amountUi) || amountUi <= 0) throw new Error("Invalid amount");
+
+        const tokenMint = params.tokenMint ? new PublicKey(String(params.tokenMint)) : null;
+        const createAta = params.createAta !== false;
+
+        const instructions = [] as any[];
+
+        if (!tokenMint) {
+          // SOL transfer
+          const lamports = Math.round(amountUi * 1_000_000_000);
+          instructions.push(
+            SystemProgram.transfer({
+              fromPubkey: kp.publicKey,
+              toPubkey: to,
+              lamports,
+            })
+          );
+        } else {
+          // SPL transfer
+          // Fetch mint decimals via parsed account
+          const mintAcc = await conn.getParsedAccountInfo(tokenMint, "confirmed");
+          const decimals = (mintAcc.value?.data as any)?.parsed?.info?.decimals;
+          if (typeof decimals !== "number") throw new Error("Unable to fetch token decimals");
+
+          const amount = BigInt(Math.round(amountUi * Math.pow(10, decimals)));
+
+          const fromAta = getAssociatedTokenAddressSync(tokenMint, kp.publicKey);
+          const toAta = getAssociatedTokenAddressSync(tokenMint, to);
+
+          if (createAta) {
+            const info = await conn.getAccountInfo(toAta, "confirmed");
+            if (!info) {
+              instructions.push(
+                createAssociatedTokenAccountIx({
+                  payer: kp.publicKey,
+                  ata: toAta,
+                  owner: to,
+                  mint: tokenMint,
+                })
+              );
+            }
+          }
+
+          instructions.push(createSplTransferIx({ source: fromAta, dest: toAta, owner: kp.publicKey, amount }));
+        }
+
+        const latest = await conn.getLatestBlockhash("confirmed");
+        const msg = new TransactionMessage({
+          payerKey: kp.publicKey,
+          recentBlockhash: latest.blockhash,
+          instructions,
+        }).compileToV0Message();
+
+        const tx = new VersionedTransaction(msg);
+        const txB64 = Buffer.from(tx.serialize()).toString("base64");
+
+        return {
+          ok: true,
+          txB64,
+          summary: {
+            kind: tokenMint ? "spl_transfer" : "sol_transfer",
+            to: to.toBase58(),
+            amount: amountUi,
+            tokenMint: tokenMint ? tokenMint.toBase58() : "SOL",
+          },
+        };
+      },
+    },
 
   // ----- solana/jupiter tools (used by solana_swap_exact_in.yaml)
     {
@@ -700,6 +850,9 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     if (t.name === "solana_token_accounts") {
       artifactRefs.push(trace.writeArtifact(runId, `token_accounts_${stepId}`, result));
     }
+    if (t.name === "solana_build_transfer_tx") {
+      artifactRefs.push(trace.writeArtifact(runId, `built_${stepId}`, result));
+    }
     if (t.name === "solana_jupiter_quote") {
       artifactRefs.push(trace.writeArtifact(runId, `quote_${stepId}`, result));
     }
@@ -727,6 +880,7 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     // Solana bindings
     if (t.name === "solana_balance") ctx.balance = result;
     if (t.name === "solana_token_accounts") ctx.tokenAccounts = result;
+    if (t.name === "solana_build_transfer_tx") ctx.built = result;
 
     // Solana swap workflow bindings
     if (t.name === "solana_jupiter_quote") ctx.quote = result;
