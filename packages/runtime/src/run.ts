@@ -1124,6 +1124,9 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     if (t.name === "solana_build_transfer_tx") {
       artifactRefs.push(trace.writeArtifact(runId, `built_${stepId}`, result));
     }
+    if (t.name === "solana_adapter_build_tx") {
+      artifactRefs.push(trace.writeArtifact(runId, `built_${stepId}`, result));
+    }
     if (t.name === "solana_jupiter_quote") {
       artifactRefs.push(trace.writeArtifact(runId, `quote_${stepId}`, result));
     }
@@ -1161,6 +1164,7 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
     if (t.name === "solana_balance") ctx.balance = result;
     if (t.name === "solana_token_accounts") ctx.tokenAccounts = result;
     if (t.name === "solana_build_transfer_tx") ctx.built = result;
+    if (t.name === "solana_adapter_build_tx") ctx.built = result;
 
     // Solana swap workflow bindings
     if (t.name === "solana_jupiter_quote") ctx.quote = result;
