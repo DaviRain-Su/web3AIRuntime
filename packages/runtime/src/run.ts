@@ -629,7 +629,8 @@ function createMockTools(): Tool[] {
         url.searchParams.set("inputMint", String(params.inputMint));
         url.searchParams.set("outputMint", String(params.outputMint));
         url.searchParams.set("amount", String(params.amount));
-        if (params.slippageBps != null) url.searchParams.set("slippageBps", String(params.slippageBps));
+        const requestedSlippageBps = params.slippageBps != null ? Number(params.slippageBps) : undefined;
+        if (requestedSlippageBps != null) url.searchParams.set("slippageBps", String(requestedSlippageBps));
 
         const apiKey = getJupiterApiKey();
         let quoteResponse: any;
@@ -648,7 +649,7 @@ function createMockTools(): Tool[] {
         ctx.__jupQuotes = ctx.__jupQuotes || {};
         ctx.__jupQuotes[quoteId] = quoteResponse;
 
-        return { ok: true, quoteId, quoteResponse };
+        return { ok: true, quoteId, requestedSlippageBps, quoteResponse };
       },
     },
     {
@@ -845,22 +846,36 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
       }
 
       // best-effort amount/slippage context
-      const quote = ctx.quote?.quoteResponse;
-      const inMint = quote?.inputMint;
-      const inAmount = quote?.inAmount;
-      const slippageBps = typeof quote?.slippageBps === "number"
-        ? quote.slippageBps
-        : (typeof (quote?.routePlan?.[0]?.swapInfo?.slippageBps) === "number" ? quote.routePlan[0].swapInfo.slippageBps : undefined);
+      const quoteResult = ctx.quote;
+      const quote = quoteResult?.quoteResponse;
 
-      const USD_MINTS = new Set([
+      const USD_MINTS_6 = new Set([
         // mainnet USDC / USDT (common)
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
       ]);
 
-      const amountUsd = (typeof inMint === "string" && USD_MINTS.has(inMint) && typeof inAmount === "string")
-        ? Number(inAmount) / 1_000_000
+      // Prefer the user-requested slippage (deterministic) over any quote field shape.
+      const slippageBps = typeof quoteResult?.requestedSlippageBps === "number"
+        ? quoteResult.requestedSlippageBps
         : undefined;
+
+      // Prefer swap quote inAmount for stablecoins (deterministic USD value).
+      const inMint = quote?.inputMint;
+      const inAmount = quote?.inAmount;
+      let amountUsd: number | undefined;
+      if (typeof inMint === "string" && USD_MINTS_6.has(inMint) && typeof inAmount === "string") {
+        const n = Number(inAmount);
+        if (Number.isFinite(n)) amountUsd = n / 1_000_000;
+      }
+
+      // If this is a stablecoin transfer built by our tool, use its summary.
+      const builtSummary = ctx.built?.summary;
+      if (amountUsd == null && builtSummary && builtSummary.kind === "spl_transfer") {
+        const mint = String(builtSummary.tokenMint);
+        const amtUi = Number(builtSummary.amount);
+        if (USD_MINTS_6.has(mint) && Number.isFinite(amtUi)) amountUsd = amtUi;
+      }
 
       const decision = engine.decide({
         chain: t.meta.chain ?? "unknown",
