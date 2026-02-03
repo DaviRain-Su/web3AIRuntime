@@ -36,6 +36,28 @@ This starts Postgres on `localhost:5432` with db `w3rt_metrics`.
 psql postgresql://postgres:postgres@localhost:5432/w3rt_metrics -f sql/schema.sql
 ```
 
+## Metrics writer (5-minute refresh)
+
+A tiny writer process upserts metrics rows into Postgres. For now it writes placeholder rows for:
+- `solend / main`
+- `meteora / dlmm:SOL/USDC`
+
+Run once:
+
+```bash
+cd examples/defi-metrics/metrics-writer
+npm install
+npm run run
+```
+
+To run every 5 minutes, use cron/systemd (example crontab):
+
+```cron
+*/5 * * * * cd /path/to/web3AIRuntime/examples/defi-metrics/metrics-writer && /usr/bin/npm run -s run >> /tmp/w3rt-metrics-writer.log 2>&1
+```
+
+> Next step: replace placeholders with real values (TVL/liquidity/vol/utilization) from on-chain + protocol APIs.
+
 ## Metrics server
 
 ```bash
