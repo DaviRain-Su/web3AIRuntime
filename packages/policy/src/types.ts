@@ -23,6 +23,9 @@ export interface PolicyConfig {
     // Conservative runtime limits (applied to broadcast actions)
     cooldownSeconds?: number; // minimum time between broadcasts
     maxTxPerMinute?: number; // rolling window limit
+
+    // Solana-specific absolute size limits (deterministic, no price feed)
+    maxSingleSol?: number;
   };
   allowlist: {
     solanaPrograms?: string[];
@@ -66,4 +69,8 @@ export interface PolicyContext {
   // Rate limiting context (computed by runtime)
   secondsSinceLastBroadcast?: number;
   broadcastsLastMinute?: number;
+
+  // Deterministic size context for Solana
+  amountSol?: number;
+  amountLamports?: number;
 }

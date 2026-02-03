@@ -849,28 +849,51 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
       const quoteResult = ctx.quote;
       const quote = quoteResult?.quoteResponse;
 
-      const USD_MINTS_6 = new Set([
-        // mainnet USDC / USDT (common)
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
-      ]);
+      // Known stablecoin mints (USDC/USDT) where ui amount == USD amount.
+      const USD_MINTS_6 = new Set<string>();
+      if (network === "mainnet") {
+        USD_MINTS_6.add("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
+        USD_MINTS_6.add("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"); // USDT
+      } else {
+        // devnet USDC (commonly used)
+        USD_MINTS_6.add("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+      }
 
       // Prefer the user-requested slippage (deterministic) over any quote field shape.
       const slippageBps = typeof quoteResult?.requestedSlippageBps === "number"
         ? quoteResult.requestedSlippageBps
         : undefined;
 
-      // Prefer swap quote inAmount for stablecoins (deterministic USD value).
+      // Deterministic SOL size (no USD conversion)
+      const WSOL_MINT = "So11111111111111111111111111111111111111112";
       const inMint = quote?.inputMint;
       const inAmount = quote?.inAmount;
+      let amountSol: number | undefined;
+      let amountLamports: number | undefined;
+      if (typeof inMint === "string" && inMint === WSOL_MINT && typeof inAmount === "string") {
+        const lamports = Number(inAmount);
+        if (Number.isFinite(lamports)) {
+          amountLamports = lamports;
+          amountSol = lamports / 1_000_000_000;
+        }
+      }
+
+      // Prefer swap quote inAmount for stablecoins (deterministic USD value).
       let amountUsd: number | undefined;
       if (typeof inMint === "string" && USD_MINTS_6.has(inMint) && typeof inAmount === "string") {
         const n = Number(inAmount);
         if (Number.isFinite(n)) amountUsd = n / 1_000_000;
       }
 
-      // If this is a stablecoin transfer built by our tool, use its summary.
+      // If this is a transfer built by our tool, use its summary.
       const builtSummary = ctx.built?.summary;
+      if (builtSummary && builtSummary.kind === "sol_transfer") {
+        const amtUi = Number(builtSummary.amount);
+        if (Number.isFinite(amtUi)) {
+          amountSol = amtUi;
+          amountLamports = Math.round(amtUi * 1_000_000_000);
+        }
+      }
       if (amountUsd == null && builtSummary && builtSummary.kind === "spl_transfer") {
         const mint = String(builtSummary.tokenMint);
         const amtUi = Number(builtSummary.amount);
@@ -889,6 +912,8 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         slippageBps: typeof slippageBps === "number" ? slippageBps : undefined,
         secondsSinceLastBroadcast,
         broadcastsLastMinute,
+        amountSol,
+        amountLamports,
       });
 
       trace.emit({

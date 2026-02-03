@@ -93,6 +93,17 @@ export class PolicyEngine {
     }
 
     // 6) basic limits
+    if (typeof ctx.amountSol === "number" && typeof this.config.transactions.maxSingleSol === "number") {
+      if (ctx.amountSol > this.config.transactions.maxSingleSol) {
+        return {
+          decision: "confirm",
+          code: "AMOUNT_SOL_LARGE",
+          message: `Large SOL amount: ${ctx.amountSol.toFixed(4)} SOL`,
+          confirmationKey: "amount_sol_large",
+        };
+      }
+    }
+
     if (typeof ctx.amountUsd === "number" && ctx.amountUsd > this.config.transactions.maxSingleAmountUsd) {
       return {
         decision: "confirm",
