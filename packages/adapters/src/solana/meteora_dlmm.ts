@@ -35,6 +35,22 @@ export const meteoraDlmmAdapter: Adapter = {
   capabilities(): AdapterCapability[] {
     return [
       {
+        action: "meteora.dlmm.swap_exact_in",
+        description: "Swap exact-in against a Meteora DLMM pool",
+        risk: "high",
+        paramsSchema: {
+          type: "object",
+          required: ["inputMint", "outputMint", "amount", "slippageBps"],
+          properties: {
+            poolAddress: { type: "string", description: "DLMM pair address" },
+            inputMint: { type: "string" },
+            outputMint: { type: "string" },
+            amount: { type: "string", description: "input amount in base units" },
+            slippageBps: { type: "number" },
+          },
+        },
+      },
+      {
         action: "meteora.dlmm.open_position",
         description: "Open a DLMM position on Meteora and add liquidity (fixed width around active price)",
         risk: "high",
@@ -73,6 +89,66 @@ export const meteoraDlmmAdapter: Adapter = {
     if (!userPublicKey) throw new Error("Missing ctx.userPublicKey");
 
     const connection = new Connection(rpcUrl, { commitment: "confirmed" });
+
+    if (action === "meteora.dlmm.swap_exact_in") {
+      const poolAddress = String(params.poolAddress || DEFAULT_SOL_USDC_POOL);
+      const inputMint = assertString(params.inputMint, "inputMint");
+      const outputMint = assertString(params.outputMint, "outputMint");
+      const amount = new BN(assertString(params.amount, "amount"));
+      const slippageBps = assertNumber(params.slippageBps, "slippageBps");
+
+      const pool = await DLMM.create(connection, new PublicKey(poolAddress));
+      await pool.refetchStates();
+
+      const tokenX = pool.tokenX.publicKey.toBase58();
+      const tokenY = pool.tokenY.publicKey.toBase58();
+
+      // Determine swap direction. swapYtoX=true means input is tokenY and output is tokenX.
+      let swapYtoX: boolean;
+      if (inputMint === tokenY && outputMint === tokenX) swapYtoX = true;
+      else if (inputMint === tokenX && outputMint === tokenY) swapYtoX = false;
+      else throw new Error(`Pool token mismatch. Pool tokens: ${tokenX}/${tokenY}`);
+
+      const binArrays = await pool.getBinArrayForSwap(swapYtoX);
+      const slip = Math.max(0, Math.min(10_000, Math.floor(slippageBps)));
+
+      // SDK expects slippage in bps (per README examples pass BN(1)); we pass slippageBps.
+      const quote = await pool.swapQuote(amount, swapYtoX, new BN(slip), binArrays);
+
+      const txOrTxs = await pool.swap({
+        inToken: new PublicKey(inputMint),
+        outToken: new PublicKey(outputMint),
+        inAmount: amount,
+        minOutAmount: quote.minOutAmount,
+        lbPair: new PublicKey(poolAddress),
+        user: new PublicKey(userPublicKey),
+        binArraysPubkey: quote.binArraysPubkey,
+      });
+
+      const tx = Array.isArray(txOrTxs) ? txOrTxs[0] : txOrTxs;
+      const latest = await connection.getLatestBlockhash("confirmed");
+      const msg = new TransactionMessage({
+        payerKey: new PublicKey(userPublicKey),
+        recentBlockhash: latest.blockhash,
+        instructions: tx.instructions,
+      }).compileToV0Message();
+
+      const vtx = new VersionedTransaction(msg);
+
+      return {
+        ok: true,
+        txB64: Buffer.from(vtx.serialize()).toString("base64"),
+        meta: {
+          chain: "solana",
+          adapter: "meteora",
+          action,
+          mints: { inputMint, outputMint },
+          amounts: { inAmount: amount.toString(), outAmount: quote.outAmount?.toString?.() ?? undefined },
+          slippageBps: slip,
+          // poolAddress omitted (not part of AdapterMeta)
+        },
+      };
+    }
 
     if (action === "meteora.dlmm.open_position") {
       const poolAddress = String(params.poolAddress || DEFAULT_SOL_USDC_POOL);

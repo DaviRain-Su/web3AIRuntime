@@ -344,7 +344,7 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
         }
 
         // Populate ctx.quote for swap actions
-        if (action === "solana.swap_exact_in") {
+        if (action === "solana.swap_exact_in" || action === "meteora.dlmm.swap_exact_in") {
           ctx.quote = {
             ok: true,
             quoteId: `ad_${adapterId}_${Date.now()}`,
