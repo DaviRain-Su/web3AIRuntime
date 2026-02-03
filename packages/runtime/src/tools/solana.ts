@@ -398,10 +398,19 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
           }
 
           // Fallback strategy (MVP): fail-closed unless explicitly allowed.
-          // If env W3RT_ALLOW_JUPITER_FALLBACK=1, we allow returning ok:false so workflows can branch.
-          if (process.env.W3RT_ALLOW_JUPITER_FALLBACK === "1") {
+          // Enable fallback branching either via user profile or env override.
+          const profile = (ctx as any)?.__profile;
+          const profileAllows = profile?.allowedProtocols?.includes?.("jupiter") !== false;
+          const allowFallback =
+            process.env.W3RT_ALLOW_JUPITER_FALLBACK === "1" ||
+            profile?.allowJupiterFallback === true ||
+            profile?.jupiterFallback === true ||
+            profile?.requireConfirmOnFallback === true; // allows returning ok:false so planner can branch + confirm
+
+          if (profileAllows && allowFallback) {
             return { ok: false, error: msg, errorCode, fallback: true };
           }
+
           throw new Error(msg);
         }
 

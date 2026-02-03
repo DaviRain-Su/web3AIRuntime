@@ -22,6 +22,7 @@ import { SolanaAdapter } from "@w3rt/chains";
 import { loadMetricsSnapshot } from "./metricsSnapshot.js";
 import { getActiveSolanaRpc, isLikelyRpcError, rotateSolanaRpc } from "./rpcFailover.js";
 import { getActiveJupiterBaseUrl, rotateJupiterBaseUrl } from "./jupiterFailover.js";
+import { loadUserProfile } from "./profile.js";
 import {
   AddressLookupTableAccount,
   Connection,
@@ -337,6 +338,8 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   const histPath = join(w3rtDir, "policy_broadcast_history.json");
   let broadcastHistory = loadBroadcastHistory(histPath);
 
+  const profile = loadUserProfile(w3rtDir);
+
   // Create workflow engine
   const engine = new WorkflowEngine({
     tools: toolMap,
@@ -511,6 +514,7 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
     __w3rtDir: w3rtDir,
     __policy: policy,
     __approve: opts.approve,
+    __profile: profile,
   });
 
   // Emit run finished
