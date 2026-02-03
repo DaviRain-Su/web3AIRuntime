@@ -1,71 +1,74 @@
-import { Client } from 'pg';
+import fs from 'node:fs';
+import path from 'node:path';
 
-// Minimal writer (v0): upsert placeholder rows for Solend + Meteora.
-// Next step: replace placeholders with real on-chain/APIs (utilization, liquidity, vol).
+// Zero-dependency writer: upsert metrics into a JSON file.
+// This avoids requiring Docker/Postgres during development.
 
-const DATABASE_URL =
-  process.env.DATABASE_URL || 'postgresql://postgres:postgres@127.0.0.1:5432/w3rt_metrics';
+const STORE_PATH =
+  process.env.METRICS_STORE_PATH ||
+  path.join(process.env.HOME || process.cwd(), '.w3rt', 'metrics', 'defi_metrics.json');
 
-async function upsert(client, row) {
-  await client.query(
-    `INSERT INTO defi_metrics
-      (chain, protocol, market, tvl_usd, liquidity_usd, price_vol_5m_bps, borrow_utilization_bps, source_url, updated_at)
-     VALUES
-      ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
-     ON CONFLICT (chain, protocol, market)
-     DO UPDATE SET
-      tvl_usd=EXCLUDED.tvl_usd,
-      liquidity_usd=EXCLUDED.liquidity_usd,
-      price_vol_5m_bps=EXCLUDED.price_vol_5m_bps,
-      borrow_utilization_bps=EXCLUDED.borrow_utilization_bps,
-      source_url=EXCLUDED.source_url,
-      updated_at=NOW();`,
-    [
-      row.chain,
-      row.protocol,
-      row.market,
-      row.tvl_usd,
-      row.liquidity_usd,
-      row.price_vol_5m_bps,
-      row.borrow_utilization_bps,
-      row.source_url,
-    ]
+function ensureDir(p) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+}
+
+function loadStore() {
+  try {
+    const raw = fs.readFileSync(STORE_PATH, 'utf-8');
+    const j = JSON.parse(raw);
+    const metrics = Array.isArray(j?.metrics) ? j.metrics : [];
+    return { metrics };
+  } catch {
+    return { metrics: [] };
+  }
+}
+
+function saveStore(store) {
+  ensureDir(STORE_PATH);
+  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+}
+
+function upsertMetric(metrics, row) {
+  const idx = metrics.findIndex(
+    (m) => m.chain === row.chain && m.protocol === row.protocol && m.market === row.market
   );
+  if (idx >= 0) metrics[idx] = { ...metrics[idx], ...row };
+  else metrics.push(row);
 }
 
 async function main() {
-  const client = new Client({ connectionString: DATABASE_URL });
-  await client.connect();
+  const store = loadStore();
+  const metrics = store.metrics;
+  const now = new Date().toISOString();
 
-  try {
-    // Solend: main market USDC reserve (we already use api.save.finance for config)
-    await upsert(client, {
-      chain: 'solana',
-      protocol: 'solend',
-      market: 'main',
-      tvl_usd: null,
-      liquidity_usd: null,
-      price_vol_5m_bps: null,
-      borrow_utilization_bps: null,
-      source_url: 'https://api.save.finance/v1/markets/configs?scope=all&deployment=production',
-    });
+  // v0 placeholders: define the two markets we agreed on.
+  upsertMetric(metrics, {
+    chain: 'solana',
+    protocol: 'solend',
+    market: 'main',
+    tvl_usd: null,
+    liquidity_usd: null,
+    price_vol_5m_bps: null,
+    borrow_utilization_bps: null,
+    source_url: 'https://api.save.finance/v1/markets/configs?scope=all&deployment=production',
+    updated_at: now,
+  });
 
-    // Meteora DLMM: SOL/USDC (placeholder)
-    await upsert(client, {
-      chain: 'solana',
-      protocol: 'meteora',
-      market: 'dlmm:SOL/USDC',
-      tvl_usd: null,
-      liquidity_usd: null,
-      price_vol_5m_bps: null,
-      borrow_utilization_bps: null,
-      source_url: 'https://meteora.ag (DLMM)',
-    });
+  upsertMetric(metrics, {
+    chain: 'solana',
+    protocol: 'meteora',
+    market: 'dlmm:SOL/USDC',
+    tvl_usd: null,
+    liquidity_usd: null,
+    price_vol_5m_bps: null,
+    borrow_utilization_bps: null,
+    source_url: 'https://meteora.ag (DLMM)',
+    updated_at: now,
+  });
 
-    console.log(JSON.stringify({ ok: true, updated: 2 }));
-  } finally {
-    await client.end().catch(() => {});
-  }
+  saveStore({ metrics });
+
+  console.log(JSON.stringify({ ok: true, store: STORE_PATH, updated: metrics.length }));
 }
 
 main().catch((e) => {

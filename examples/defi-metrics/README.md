@@ -6,13 +6,19 @@ This folder is an **example sidecar**. It is not required to build w3rt.
 
 ## Architecture
 
-- **CocoIndex** (python) runs an incremental dataflow and exports into Postgres.
-- A tiny **metrics HTTP server** exposes read-only endpoints for w3rt.
-- w3rt queries metrics via `W3RT_METRICS_URL`.
+**Phase 0 (no Docker / no Postgres):** JSON store for quick iteration.
+
+```
+metrics-writer (json)  ->  ~/.w3rt/metrics/defi_metrics.json  ->  metrics-server(HTTP)  ->  w3rt tools
+```
+
+**Phase 1 (CocoIndex + Postgres):** incremental processing + lineage.
 
 ```
 CocoIndex flow  ->  Postgres(defi_metrics)  ->  metrics-server(HTTP)  ->  w3rt tools
 ```
+
+w3rt queries metrics via `W3RT_METRICS_URL`.
 
 ## What we track (v0)
 
@@ -21,24 +27,9 @@ CocoIndex flow  ->  Postgres(defi_metrics)  ->  metrics-server(HTTP)  ->  w3rt t
 - `price_vol_5m_bps` (rolling 5m volatility in bps)
 - `borrow_utilization_bps`
 
-## Run Postgres
-
-```bash
-cd examples/defi-metrics
-docker compose up -d
-```
-
-This starts Postgres on `localhost:5432` with db `w3rt_metrics`.
-
-## Initialize schema
-
-```bash
-psql postgresql://postgres:postgres@localhost:5432/w3rt_metrics -f sql/schema.sql
-```
-
 ## Metrics writer (5-minute refresh)
 
-A tiny writer process upserts metrics rows into Postgres. For now it writes placeholder rows for:
+Writes placeholder rows (v0) for:
 - `solend / main`
 - `meteora / dlmm:SOL/USDC`
 
@@ -46,19 +37,32 @@ Run once:
 
 ```bash
 cd examples/defi-metrics/metrics-writer
-npm install
-npm run run
+node writer.js
 ```
 
 To run every 5 minutes, use cron/systemd (example crontab):
 
 ```cron
-*/5 * * * * cd /path/to/web3AIRuntime/examples/defi-metrics/metrics-writer && /usr/bin/npm run -s run >> /tmp/w3rt-metrics-writer.log 2>&1
+*/5 * * * * /usr/bin/node /path/to/web3AIRuntime/examples/defi-metrics/metrics-writer/writer.js >> /tmp/w3rt-metrics-writer.log 2>&1
 ```
 
-> Next step: replace placeholders with real values (TVL/liquidity/vol/utilization) from on-chain + protocol APIs.
+The writer outputs to a JSON store (default):
+- `~/.w3rt/metrics/defi_metrics.json`
+
+Override path with:
+- `METRICS_STORE_PATH=/some/path.json`
 
 ## Metrics server
+
+```bash
+cd examples/defi-metrics/metrics-server
+node server.js
+```
+
+Health:
+```bash
+curl -s http://127.0.0.1:8789/health
+```
 
 ```bash
 cd metrics-server

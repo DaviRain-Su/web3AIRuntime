@@ -5,8 +5,5 @@
   "type": "module",
   "scripts": {
     "run": "node writer.js"
-  },
-  "dependencies": {
-    "pg": "^8.13.1"
   }
 }

@@ -1,10 +1,17 @@
 import http from 'node:http';
-import { Client } from 'pg';
+import fs from 'node:fs';
+import path from 'node:path';
+
+// Zero-dependency mode: read metrics from a JSON file written by metrics-writer.
+// This avoids requiring Docker/Postgres during development.
 
 const PORT = Number(process.env.PORT || 8789);
 const HOST = String(process.env.HOST || '127.0.0.1');
-const DATABASE_URL =
-  process.env.DATABASE_URL || 'postgresql://postgres:postgres@127.0.0.1:5432/w3rt_metrics';
+
+// File layout: { metrics: [ {chain,protocol,market,tvl_usd,liquidity_usd,price_vol_5m_bps,borrow_utilization_bps,source_url,updated_at} ] }
+const STORE_PATH =
+  process.env.METRICS_STORE_PATH ||
+  path.join(process.env.HOME || process.cwd(), '.w3rt', 'metrics', 'defi_metrics.json');
 
 function send(res, code, body) {
   const data = JSON.stringify(body, null, 2);
@@ -14,13 +21,14 @@ function send(res, code, body) {
   res.end(data);
 }
 
-async function withClient(fn) {
-  const c = new Client({ connectionString: DATABASE_URL });
-  await c.connect();
+function loadStore() {
   try {
-    return await fn(c);
-  } finally {
-    await c.end().catch(() => {});
+    const raw = fs.readFileSync(STORE_PATH, 'utf-8');
+    const j = JSON.parse(raw);
+    const metrics = Array.isArray(j?.metrics) ? j.metrics : [];
+    return { metrics };
+  } catch {
+    return { metrics: [] };
   }
 }
 
@@ -29,39 +37,31 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      return send(res, 200, { ok: true });
+      return send(res, 200, { ok: true, store: 'json', storePath: STORE_PATH });
     }
 
-    // GET /v1/metrics/get?chain=solana&protocol=solend&market=main
     if (req.method === 'GET' && url.pathname === '/v1/metrics/get') {
       const chain = url.searchParams.get('chain') || 'solana';
       const protocol = url.searchParams.get('protocol') || '';
       const market = url.searchParams.get('market') || '';
       if (!protocol || !market) return send(res, 400, { ok: false, error: 'MISSING_PARAMS' });
 
-      const row = await withClient(async (c) => {
-        const r = await c.query(
-          'SELECT chain,protocol,market,tvl_usd,liquidity_usd,price_vol_5m_bps,borrow_utilization_bps,updated_at,source_url FROM defi_metrics WHERE chain=$1 AND protocol=$2 AND market=$3',
-          [chain, protocol, market]
-        );
-        return r.rows[0] || null;
-      });
+      const { metrics } = loadStore();
+      const row =
+        metrics.find((m) => m?.chain === chain && m?.protocol === protocol && m?.market === market) || null;
 
       return send(res, 200, { ok: true, metric: row });
     }
 
-    // GET /v1/metrics/list?chain=solana&limit=20
     if (req.method === 'GET' && url.pathname === '/v1/metrics/list') {
       const chain = url.searchParams.get('chain') || 'solana';
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit') || 20)));
 
-      const rows = await withClient(async (c) => {
-        const r = await c.query(
-          'SELECT chain,protocol,market,tvl_usd,liquidity_usd,price_vol_5m_bps,borrow_utilization_bps,updated_at FROM defi_metrics WHERE chain=$1 ORDER BY updated_at DESC LIMIT $2',
-          [chain, limit]
-        );
-        return r.rows;
-      });
+      const { metrics } = loadStore();
+      const rows = metrics
+        .filter((m) => m?.chain === chain)
+        .sort((a, b) => String(b?.updated_at ?? '').localeCompare(String(a?.updated_at ?? '')))
+        .slice(0, limit);
 
       return send(res, 200, { ok: true, metrics: rows });
     }
@@ -73,5 +73,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`metrics-server listening on http://${HOST}:${PORT}`);
+  console.log(`metrics-server listening on http://${HOST}:${PORT} (json store: ${STORE_PATH})`);
 });
