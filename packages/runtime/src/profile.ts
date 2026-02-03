@@ -13,9 +13,13 @@ export type UserProfile = {
   requireConfirmOnFallback: boolean;
 
   // Optional allowlists for safe, user-specific composability.
-  // Examples: ["SOL/USDC", "JUP/USDC"]
-  allowedPairs?: string[];
-  // Optional hard allowlist of pool addresses (stronger than allowedPairs).
+  // These are chain-specific to avoid accidental cross-chain blocking.
+  // If you only set `allowedPairs`, it is treated as Solana allowlist for backwards compatibility.
+  allowedPairs?: string[]; // legacy alias for allowedPairsSolana
+  allowedPairsSolana?: string[];
+  allowedPairsEvm?: string[];
+
+  // Optional hard allowlist of pool addresses (stronger than allowedPairs*).
   allowedMeteoraPools?: string[];
 };
 
@@ -45,6 +49,8 @@ export function loadUserProfile(w3rtDir?: string): UserProfile {
     const requireConfirmOnFallback = j.requireConfirmOnFallback !== false;
 
     const allowedPairs = Array.isArray(j.allowedPairs) ? j.allowedPairs.map(String) : undefined;
+    const allowedPairsSolana = Array.isArray(j.allowedPairsSolana) ? j.allowedPairsSolana.map(String) : undefined;
+    const allowedPairsEvm = Array.isArray(j.allowedPairsEvm) ? j.allowedPairsEvm.map(String) : undefined;
     const allowedMeteoraPools = Array.isArray(j.allowedMeteoraPools) ? j.allowedMeteoraPools.map(String) : undefined;
 
     return {
@@ -54,6 +60,8 @@ export function loadUserProfile(w3rtDir?: string): UserProfile {
       allowedProtocols,
       requireConfirmOnFallback,
       allowedPairs,
+      allowedPairsSolana,
+      allowedPairsEvm,
       allowedMeteoraPools,
     };
   } catch {

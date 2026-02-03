@@ -39,6 +39,8 @@ import { createMeteoraTools } from "./tools/meteora.js";
 import { createEvmTools } from "./tools/evm.js";
 import type { Tool } from "./tools/types.js";
 
+import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter, zeroExAdapter } from "@w3rt/adapters";
+
 import {
   appendLearningEvent,
   ensureLearningStore,
@@ -316,6 +318,11 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   // Load policy
   const policyConfig = loadPolicyConfig(w3rtDir);
   const policy = new PolicyEngine(policyConfig);
+
+  // Register adapters (idempotent) so tools can route via defaultRegistry.
+  for (const a of [jupiterAdapter, meteoraDlmmAdapter, solendAdapter, zeroExAdapter]) {
+    try { defaultRegistry.register(a); } catch {}
+  }
 
   // Create tools
   const mockTools = createMockTools();

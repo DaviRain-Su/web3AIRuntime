@@ -23,7 +23,11 @@ export function createMeteoraTools(): Tool[] {
         const outputMint = normMint(params.outputMint);
         if (!inputMint || !outputMint) return { ok: false, error: "MISSING_MINTS" };
 
-        const allowedPairs = Array.isArray(ctx?.__profile?.allowedPairs) ? ctx.__profile.allowedPairs : null;
+        const allowedPairs = Array.isArray(ctx?.__profile?.allowedPairsSolana)
+          ? ctx.__profile.allowedPairsSolana
+          : Array.isArray(ctx?.__profile?.allowedPairs)
+            ? ctx.__profile.allowedPairs
+            : null;
         const allowedPools = Array.isArray(ctx?.__profile?.allowedMeteoraPools) ? ctx.__profile.allowedMeteoraPools : null;
 
         // NOTE: The DLMM API doesn't currently provide a direct query-by-mints endpoint.

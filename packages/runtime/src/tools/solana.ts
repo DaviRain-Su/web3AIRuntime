@@ -204,7 +204,12 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
           const rows = text ? JSON.parse(text) : [];
           const arr = Array.isArray(rows) ? rows : [];
 
-          const allowedPairs = Array.isArray(profile?.allowedPairs) ? profile.allowedPairs.map((s: any) => String(s).toUpperCase()) : null;
+          const allowedPairsRaw = Array.isArray(profile?.allowedPairsSolana)
+            ? profile.allowedPairsSolana
+            : Array.isArray(profile?.allowedPairs)
+              ? profile.allowedPairs
+              : null;
+          const allowedPairs = allowedPairsRaw ? allowedPairsRaw.map((s: any) => String(s).toUpperCase()) : null;
           const allowedPools = Array.isArray(profile?.allowedMeteoraPools) ? profile.allowedMeteoraPools.map(String) : null;
 
           const candidates = arr.filter((p: any) => {
