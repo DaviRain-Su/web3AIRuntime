@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "build": "sh -c 'cd packages/workflow && bun run build' && sh -c 'cd packages/policy && bun run build' && sh -c 'cd packages/trace && bun run build' && sh -c 'cd packages/chains && bun run build' && sh -c 'cd packages/adapters && bun run build' && sh -c 'cd packages/runtime && bun run build' && sh -c 'cd packages/core && bun run build' && sh -c 'cd packages/host-pi && bun run build' && sh -c 'cd packages/pi && bun run build'",
-    "test": "bun run --workspaces test",
+    "test": "bun run build && bun run --workspaces test",
     "lint": "bun run --workspaces lint",
 
     "postinstall": "node ./scripts/disable-bigint-buffer-native.cjs",

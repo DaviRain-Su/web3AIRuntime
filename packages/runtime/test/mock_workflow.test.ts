@@ -18,16 +18,51 @@ describe("w3rt core runner", () => {
     const dir = mkdtempSync(join(tmpdir(), "w3rt-test-"));
     const wf = resolve(new URL("../../../workflows/mock-arb.yaml", import.meta.url).pathname);
 
-    const { runId } = await runWorkflowFromFile(wf, {
-      w3rtDir: dir,
-      approve: async () => true,
-    });
+    // The legacy runner loads policy from process.cwd()/.w3rt/policy.yaml.
+    // Create a permissive policy in an isolated cwd so tests don't depend on repo-level policy.
+    const prevCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      mkdirSync(join(dir, ".w3rt"), { recursive: true });
+      writeFileSync(
+        join(dir, ".w3rt", "policy.yaml"),
+        `
+networks:
+  mainnet:
+    enabled: true
+    requireApproval: false
+    requireSimulation: false
+  testnet:
+    enabled: true
+    requireApproval: false
+transactions:
+  maxSingleAmountUsd: 100000
+  maxSlippageBps: 1000
+  requireConfirmation: never
+allowlist:
+  actions: []
+rules: []
+`
+      );
 
-    const tracePath = join(dir, "runs", runId, "trace.jsonl");
-    const events = readJsonl(tracePath);
+      // Also force a non-mainnet RPC for test determinism.
+      process.env.W3RT_SOLANA_RPC_URL = "https://api.devnet.solana.com";
 
-    expect(events[0].type).toBe("run.started");
-    expect(events[events.length - 1].type).toBe("run.finished");
-    expect(events[events.length - 1].data.ok).toBe(true);
+      const { runId } = await runWorkflowFromFile(wf, {
+        w3rtDir: dir,
+        approve: async () => true,
+      });
+
+      const tracePath = join(dir, "runs", runId, "trace.jsonl");
+      const events = readJsonl(tracePath);
+
+      expect(events[0].type).toBe("run.started");
+      expect(events[events.length - 1].type).toBe("run.finished");
+      expect(events[events.length - 1].data.ok).toBe(true);
+    } finally {
+      process.chdir(prevCwd);
+    }
   });
 });
