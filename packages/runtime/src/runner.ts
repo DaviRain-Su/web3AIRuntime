@@ -1,0 +1,410 @@
+/**
+ * Workflow runner using the modular WorkflowEngine.
+ * This is the new implementation that uses @w3rt/workflow engine.
+ */
+
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import yaml from "js-yaml";
+
+import {
+  WorkflowEngine,
+  parseWorkflowFile,
+  type ToolDefinition,
+  type Dict,
+} from "@w3rt/workflow";
+import { TraceStore } from "@w3rt/trace";
+import { PolicyEngine, type PolicyConfig, type PolicyContext } from "@w3rt/policy";
+import { SolanaAdapter } from "@w3rt/chains";
+import {
+  AddressLookupTableAccount,
+  Connection,
+  Keypair,
+  PublicKey,
+  VersionedTransaction,
+  clusterApiUrl,
+} from "@solana/web3.js";
+
+import { createMockTools } from "./tools/mock.js";
+import { createSolanaTools } from "./tools/solana.js";
+import type { Tool } from "./tools/types.js";
+
+// --- Config helpers ---
+
+function defaultW3rtDir() {
+  return join(os.homedir(), ".w3rt");
+}
+
+function loadSolanaCliConfig(): { rpcUrl?: string; keypairPath?: string } {
+  try {
+    const p = join(os.homedir(), ".config", "solana", "cli", "config.yml");
+    const cfg = yaml.load(readFileSync(p, "utf-8")) as any;
+    return { rpcUrl: cfg?.json_rpc_url, keypairPath: cfg?.keypair_path };
+  } catch {
+    return {};
+  }
+}
+
+export function loadSolanaKeypair(): Keypair | null {
+  const raw = process.env.W3RT_SOLANA_PRIVATE_KEY;
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) return Keypair.fromSecretKey(Uint8Array.from(arr));
+    } catch {}
+  }
+
+  const kpPath = process.env.W3RT_SOLANA_KEYPAIR_PATH || loadSolanaCliConfig().keypairPath;
+  if (kpPath) {
+    try {
+      const arr = JSON.parse(readFileSync(kpPath, "utf-8"));
+      if (Array.isArray(arr)) return Keypair.fromSecretKey(Uint8Array.from(arr));
+    } catch {}
+  }
+
+  return null;
+}
+
+export function resolveSolanaRpc(): string {
+  if (process.env.W3RT_SOLANA_RPC_URL) return process.env.W3RT_SOLANA_RPC_URL;
+  const cli = loadSolanaCliConfig();
+  if (cli.rpcUrl) return cli.rpcUrl;
+  const cluster = (process.env.W3RT_SOLANA_CLUSTER as any) || "devnet";
+  return clusterApiUrl(cluster);
+}
+
+function inferNetworkFromRpcUrl(rpcUrl: string): "mainnet" | "testnet" {
+  const u = rpcUrl.toLowerCase();
+  if (u.includes("mainnet")) return "mainnet";
+  return "testnet";
+}
+
+function getJupiterBaseUrl(): string {
+  return process.env.W3RT_JUPITER_BASE_URL || "https://api.jup.ag";
+}
+
+function getJupiterApiKey(): string | undefined {
+  return process.env.W3RT_JUPITER_API_KEY;
+}
+
+// --- Broadcast history for rate limiting ---
+
+type BroadcastHistoryState = { timestampsMs: number[] };
+
+function loadBroadcastHistory(statePath: string): BroadcastHistoryState {
+  try {
+    const raw = readFileSync(statePath, "utf-8");
+    const j = JSON.parse(raw);
+    const ts = Array.isArray(j?.timestampsMs) ? j.timestampsMs.filter((n: any) => Number.isFinite(n)) : [];
+    return { timestampsMs: ts };
+  } catch {
+    return { timestampsMs: [] };
+  }
+}
+
+function saveBroadcastHistory(statePath: string, st: BroadcastHistoryState) {
+  const pruned = st.timestampsMs.filter((n) => Number.isFinite(n)).slice(-1000);
+  try {
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, JSON.stringify({ timestampsMs: pruned }, null, 2));
+  } catch {}
+}
+
+// --- Extract program IDs from Solana tx ---
+
+async function extractSolanaProgramIds(txB64: string, rpcUrl: string): Promise<{ known: boolean; ids: string[] }> {
+  try {
+    const raw = Buffer.from(txB64, "base64");
+    const tx = VersionedTransaction.deserialize(raw);
+    const conn = new Connection(rpcUrl, { commitment: "processed" });
+
+    const lookups = tx.message.addressTableLookups ?? [];
+    const altAccounts: AddressLookupTableAccount[] = [];
+
+    for (const l of lookups) {
+      const key = new PublicKey(l.accountKey);
+      const res = await conn.getAddressLookupTable(key);
+      if (res.value) altAccounts.push(res.value);
+    }
+
+    const keys = tx.message.getAccountKeys({ addressLookupTableAccounts: altAccounts });
+    const programIds = new Set<string>();
+
+    for (const ix of tx.message.compiledInstructions) {
+      const pk = keys.get(ix.programIdIndex);
+      if (pk) programIds.add(pk.toBase58());
+    }
+
+    return { known: true, ids: [...programIds] };
+  } catch {
+    return { known: false, ids: [] };
+  }
+}
+
+// --- Load policy config ---
+
+function loadPolicyConfig(w3rtDir: string): PolicyConfig {
+  const policyPath = join(w3rtDir, "policy.yaml");
+  try {
+    const raw = readFileSync(policyPath, "utf-8");
+    return yaml.load(raw) as PolicyConfig;
+  } catch {
+    // Default safe policy
+    return {
+      networks: {
+        mainnet: { enabled: true, requireApproval: true, requireSimulation: true, maxDailyVolumeUsd: 500 },
+        testnet: { enabled: true, requireApproval: false },
+      },
+      transactions: {
+        maxSingleAmountUsd: 100,
+        maxSlippageBps: 100,
+        requireConfirmation: "large",
+      },
+      allowlist: {
+        actions: ["swap", "transfer", "balance", "quote", "simulate", "confirm"],
+      },
+      rules: [],
+    };
+  }
+}
+
+// --- Convert our Tool to WorkflowEngine ToolDefinition ---
+
+function convertToEngineTool(tool: Tool): ToolDefinition {
+  return {
+    name: tool.name,
+    meta: {
+      action: tool.meta.action,
+      sideEffect: tool.meta.sideEffect,
+      chain: tool.meta.chain,
+      risk: tool.meta.risk as "low" | "medium" | "high" | undefined,
+    },
+    execute: tool.execute,
+  };
+}
+
+// --- Runner options ---
+
+export interface RunnerOptions {
+  w3rtDir?: string;
+  approve?: (prompt: string) => Promise<boolean>;
+}
+
+// --- Main runner function ---
+
+export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}) {
+  const w3rtDir = opts.w3rtDir ?? defaultW3rtDir();
+  const runId = `run_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+
+  // Parse workflow
+  const parseResult = parseWorkflowFile(workflowPath);
+  if (!parseResult.ok || !parseResult.workflow) {
+    throw new Error(`Failed to parse workflow: ${parseResult.errors?.join(", ")}`);
+  }
+  const workflow = parseResult.workflow;
+
+  // Initialize trace store
+  const trace = new TraceStore(w3rtDir);
+
+  // Load policy
+  const policyConfig = loadPolicyConfig(w3rtDir);
+  const policy = new PolicyEngine(policyConfig);
+
+  // Create tools
+  const mockTools = createMockTools();
+  const solanaTools = createSolanaTools({
+    getRpcUrl: resolveSolanaRpc,
+    getKeypair: loadSolanaKeypair,
+    getJupiterBaseUrl: getJupiterBaseUrl,
+    getJupiterApiKey: getJupiterApiKey,
+  });
+
+  const allTools = [...mockTools, ...solanaTools];
+  const toolMap = new Map(allTools.map((t) => [t.name, convertToEngineTool(t)]));
+
+  // Broadcast history for rate limiting
+  const histPath = join(w3rtDir, "policy_broadcast_history.json");
+  let broadcastHistory = loadBroadcastHistory(histPath);
+
+  // Create workflow engine
+  const engine = new WorkflowEngine({
+    tools: toolMap,
+
+    onStageStart: async (stage, ctx) => {
+      trace.emit({
+        ts: Date.now(),
+        type: "step.started",
+        runId,
+        stepId: stage.name,
+        data: { stageType: stage.type },
+      });
+    },
+
+    onStageEnd: async (stage, ctx, error) => {
+      trace.emit({
+        ts: Date.now(),
+        type: "step.finished",
+        runId,
+        stepId: stage.name,
+        data: error ? { error: error.message } : {},
+      });
+    },
+
+    onActionStart: async (action, tool, params, ctx) => {
+      trace.emit({
+        ts: Date.now(),
+        type: "tool.called",
+        runId,
+        stepId: ctx.__currentStage,
+        tool: tool.name,
+        data: { params },
+      });
+    },
+
+    onActionEnd: async (action, tool, result, ctx) => {
+      // Save artifacts for audit
+      const artifactRefs: any[] = [];
+      if (tool.name.includes("quote") || tool.name.includes("build") || tool.name.includes("balance")) {
+        artifactRefs.push(trace.writeArtifact(runId, `${tool.name}_${Date.now()}`, result));
+      }
+
+      trace.emit({
+        ts: Date.now(),
+        type: "tool.result",
+        runId,
+        stepId: ctx.__currentStage,
+        tool: tool.name,
+        data: { ok: result?.ok },
+        artifactRefs,
+      });
+
+      // Track broadcasts
+      if (tool.meta.sideEffect === "broadcast" && result?.ok) {
+        broadcastHistory.timestampsMs.push(Date.now());
+        saveBroadcastHistory(histPath, broadcastHistory);
+
+        trace.emit({
+          ts: Date.now(),
+          type: "tx.submitted",
+          runId,
+          chain: tool.meta.chain,
+          data: { signature: result.signature, txHash: result.txHash },
+        });
+      }
+    },
+
+    onApprovalRequired: async (stage, ctx) => {
+      if (opts.approve) {
+        return opts.approve(`Approve stage '${stage.name}'?`);
+      }
+      return false;
+    },
+
+    onPolicyCheck: async (tool, params, ctx) => {
+      const rpc = tool.meta.chain === "solana" ? resolveSolanaRpc() : "";
+      const network = tool.meta.chain === "solana" ? inferNetworkFromRpcUrl(rpc) : "mainnet";
+
+      // Rate limiting context
+      const now = Date.now();
+      const last = broadcastHistory.timestampsMs.length
+        ? broadcastHistory.timestampsMs[broadcastHistory.timestampsMs.length - 1]
+        : undefined;
+      const secondsSinceLastBroadcast = typeof last === "number" ? (now - last) / 1000 : undefined;
+      const broadcastsLastMinute = broadcastHistory.timestampsMs.filter((ts) => now - ts < 60_000).length;
+
+      // Extract program IDs for Solana
+      let programIds: string[] | undefined;
+      let programIdsKnown: boolean | undefined;
+      if (tool.meta.chain === "solana" && typeof params.txB64 === "string") {
+        const result = await extractSolanaProgramIds(params.txB64, resolveSolanaRpc());
+        programIds = result.ids;
+        programIdsKnown = result.known;
+      }
+
+      // Build policy context
+      const policyCtx: PolicyContext = {
+        chain: tool.meta.chain ?? "unknown",
+        network,
+        action: tool.meta.action,
+        sideEffect: tool.meta.sideEffect,
+        simulationOk: ctx.simulation?.ok === true,
+        programIds,
+        programIdsKnown,
+        secondsSinceLastBroadcast,
+        broadcastsLastMinute,
+      };
+
+      // Add amount/slippage if available
+      const quote = ctx.quote?.quoteResponse;
+      if (quote) {
+        if (typeof ctx.quote?.requestedSlippageBps === "number") {
+          policyCtx.slippageBps = ctx.quote.requestedSlippageBps;
+        }
+        // Try to derive simulated slippage
+        const expOut = Number(quote.outAmount);
+        const simOut = Number(ctx.simulation?.simulatedOutAmount);
+        if (Number.isFinite(expOut) && expOut > 0 && Number.isFinite(simOut) && simOut >= 0) {
+          const slip = (expOut - simOut) / expOut;
+          if (Number.isFinite(slip)) {
+            policyCtx.simulatedSlippageBps = Math.max(0, Math.round(slip * 10_000));
+          }
+        }
+      }
+
+      const decision = policy.decide(policyCtx);
+
+      trace.emit({
+        ts: Date.now(),
+        type: "policy.decision",
+        runId,
+        tool: tool.name,
+        data: { ...decision, programIds },
+      });
+
+      if (decision.decision === "block") {
+        return { allowed: false, reason: `${decision.code}: ${decision.message}` };
+      }
+
+      if (decision.decision === "confirm") {
+        if (opts.approve) {
+          const approved = await opts.approve(`Policy: ${decision.message}`);
+          if (!approved) {
+            return { allowed: false, reason: "User rejected policy confirmation" };
+          }
+        } else {
+          return { allowed: false, reason: "Policy requires confirmation but no approver configured" };
+        }
+      }
+
+      return { allowed: true };
+    },
+  });
+
+  // Emit run started
+  trace.emit({
+    ts: Date.now(),
+    type: "run.started",
+    runId,
+    data: { workflow: workflow.name, version: workflow.version },
+  });
+
+  // Run workflow
+  const result = await engine.run(workflow, {
+    __runId: runId,
+    __w3rtDir: w3rtDir,
+    __policy: policy,
+    __approve: opts.approve,
+  });
+
+  // Emit run finished
+  trace.emit({
+    ts: Date.now(),
+    type: "run.finished",
+    runId,
+    data: { ok: result.ok, error: result.error },
+  });
+
+  return { runId, ok: result.ok, error: result.error, context: result.context };
+}

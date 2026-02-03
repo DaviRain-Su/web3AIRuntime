@@ -1,4 +1,5 @@
 import type { PolicyConfig, PolicyContext, PolicyDecision } from "./types.js";
+import { evaluateRules } from "./rules.js";
 
 export class PolicyEngine {
   constructor(public readonly config: PolicyConfig) {}
@@ -114,9 +115,11 @@ export class PolicyEngine {
     }
 
     // Prefer simulation-derived slippage if available (more reality-based than requested).
+    // This check only applies to Solana swaps where we can derive slippage from simulation.
     const requireSimSlip = this.config.transactions.requireSimulatedSlippageOnMainnet === true;
     if (
       requireSimSlip &&
+      ctx.chain === "solana" &&
       ctx.network === "mainnet" &&
       ctx.sideEffect === "broadcast" &&
       ctx.action === "swap" &&
@@ -139,6 +142,35 @@ export class PolicyEngine {
         message: `${slippageLabel}: ${(slippageToCheck / 100).toFixed(2)}%`,
         confirmationKey: "slippage_high",
       };
+    }
+
+    // 7) Custom rules DSL evaluation
+    if (this.config.rules && this.config.rules.length > 0) {
+      const ruleResult = evaluateRules(this.config.rules, ctx);
+      if (ruleResult && ruleResult.matched) {
+        const message = ruleResult.message ?? `Rule matched: ${ruleResult.ruleName}`;
+        switch (ruleResult.action) {
+          case "block":
+            return {
+              decision: "block",
+              code: `RULE_${ruleResult.ruleName?.toUpperCase() ?? "BLOCKED"}`,
+              message,
+            };
+          case "confirm":
+            return {
+              decision: "confirm",
+              code: `RULE_${ruleResult.ruleName?.toUpperCase() ?? "CONFIRM"}`,
+              message,
+              confirmationKey: `rule_${ruleResult.ruleName ?? "confirm"}`,
+            };
+          case "warn":
+            return {
+              decision: "warn",
+              code: `RULE_${ruleResult.ruleName?.toUpperCase() ?? "WARN"}`,
+              message,
+            };
+        }
+      }
     }
 
     return { decision: "allow" };

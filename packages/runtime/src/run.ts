@@ -408,7 +408,7 @@ function createMockTools(): Tool[] {
     },
     {
       name: "swap",
-      meta: { action: "swap", sideEffect: "broadcast", risk: "high" },
+      meta: { action: "swap", sideEffect: "broadcast", chain: "sui", risk: "high" },
       async execute(params, ctx) {
         const profitUsd = Number(ctx?.simulation?.profitUsd ?? 0);
         return {

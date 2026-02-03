@@ -12,5 +12,8 @@
     "build": "bunx tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "lint": "echo 'no lint yet'"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0"
   }
 }

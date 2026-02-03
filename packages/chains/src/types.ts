@@ -37,6 +37,31 @@ export interface ChainAdapter {
   getBalance(address: string, token?: string): Promise<Balance[]>;
   buildTransferTx(params: TransferParams): Promise<UnsignedTx>;
   simulateTx(tx: UnsignedTx): Promise<SimulationResult>;
-  sendTx(tx: UnsignedTx): Promise<TxReceipt>;
+  sendTx(tx: UnsignedTx, signers?: unknown[]): Promise<TxReceipt>;
   waitForTx(txHash: string): Promise<TxReceipt>;
+}
+
+// Chain adapter registry for multi-chain support
+export class ChainRegistry {
+  private adapters = new Map<ChainName, ChainAdapter>();
+
+  register(adapter: ChainAdapter): void {
+    this.adapters.set(adapter.name, adapter);
+  }
+
+  get(chain: ChainName): ChainAdapter {
+    const adapter = this.adapters.get(chain);
+    if (!adapter) {
+      throw new Error(`Chain adapter not found: ${chain}`);
+    }
+    return adapter;
+  }
+
+  has(chain: ChainName): boolean {
+    return this.adapters.has(chain);
+  }
+
+  list(): ChainName[] {
+    return [...this.adapters.keys()];
+  }
 }

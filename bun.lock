@@ -1,6 +1,5 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 1,
   "workspaces": {
     "": {
       "name": "web3-ai-runtime",
@@ -25,6 +24,9 @@
     "packages/chains": {
       "name": "@w3rt/chains",
       "version": "0.0.0",
+      "dependencies": {
+        "@solana/web3.js": "^1.98.0",
+      },
     },
     "packages/core": {
       "name": "@w3rt/core",
@@ -84,6 +86,12 @@
     "packages/workflow": {
       "name": "@w3rt/workflow",
       "version": "0.0.0",
+      "dependencies": {
+        "js-yaml": "^4.1.0",
+      },
+      "devDependencies": {
+        "@types/js-yaml": "^4.0.9",
+      },
     },
   },
   "packages": {
