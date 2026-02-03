@@ -133,6 +133,133 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
   const { getRpcUrl, getKeypair, getJupiterBaseUrl, getJupiterApiKey } = config;
 
   return [
+    // Canonical swap router: tries Jupiter first, then falls back to other venues (e.g. Meteora)
+    {
+      name: "solana_swap_exact_in",
+      meta: { action: "swap", sideEffect: "none", chain: "solana", risk: "high" },
+      async execute(params, ctx) {
+        const kp = getKeypair();
+        if (!kp) throw new Error("Missing Solana keypair.");
+
+        const inputMint = String(params.inputMint);
+        const outputMint = String(params.outputMint);
+        const amount = String(params.amount);
+        const slippageBps = params.slippageBps != null ? Number(params.slippageBps) : (ctx?.__profile?.maxSlippageBps ?? 100);
+
+        const profile = (ctx as any)?.__profile;
+        const allowedProtocols: string[] = Array.isArray(profile?.allowedProtocols) ? profile.allowedProtocols : [];
+        const allowMeteora = allowedProtocols.length ? allowedProtocols.includes("meteora") : true;
+        const allowJupiter = allowedProtocols.length ? allowedProtocols.includes("jupiter") : true;
+
+        // 1) Try Jupiter adapter (fastest/best routing when available)
+        if (allowJupiter) {
+          try {
+            const out = await defaultRegistry.get("jupiter").buildTx(
+              "solana.swap_exact_in",
+              { inputMint, outputMint, amount, slippageBps },
+              { userPublicKey: kp.publicKey.toBase58() }
+            );
+
+            ctx.quote = {
+              ok: true,
+              quoteId: `jup_${Date.now()}`,
+              requestedSlippageBps: slippageBps,
+              quoteResponse: {
+                inputMint: out.meta.mints?.inputMint,
+                outputMint: out.meta.mints?.outputMint,
+                inAmount: out.meta.amounts?.inAmount,
+                outAmount: out.meta.amounts?.outAmount,
+              },
+            };
+
+            return { ok: true, route: "jupiter", txB64: out.txB64, meta: out.meta };
+          } catch (e: any) {
+            const msg = String(e?.message ?? e);
+            const unauthorized = msg.includes("401") || msg.toLowerCase().includes("unauthorized");
+
+            // If Jupiter failed and fallback is not allowed, fail closed.
+            const requireConfirmOnFallback = profile?.requireConfirmOnFallback === true;
+            const allowFallback = process.env.W3RT_ALLOW_JUPITER_FALLBACK === "1" || requireConfirmOnFallback === true;
+            if (!allowFallback) throw e;
+
+            // If key missing/invalid, we'll proceed to fallback if allowed.
+            if (!unauthorized) {
+              // network/other errors also can fall back
+            }
+          }
+        }
+
+        // 2) Fallback: Meteora DLMM
+        if (!allowMeteora) {
+          throw new Error("Swap fallback requires meteora, but it is not allowed by profile.allowedProtocols");
+        }
+
+        // Pick pool (tool) unless explicitly provided.
+        let poolAddress = params.poolAddress ? String(params.poolAddress) : undefined;
+        if (!poolAddress) {
+          // Reuse the same selection logic as meteora_pick_pool (keep local to avoid tool plumbing).
+          const res = await fetch("https://dlmm-api.meteora.ag/pair/all");
+          const text = await res.text();
+          if (!res.ok) throw new Error(`Meteora pool catalog failed: HTTP ${res.status}: ${text}`);
+          const rows = text ? JSON.parse(text) : [];
+          const arr = Array.isArray(rows) ? rows : [];
+
+          const allowedPairs = Array.isArray(profile?.allowedPairs) ? profile.allowedPairs.map((s: any) => String(s).toUpperCase()) : null;
+          const allowedPools = Array.isArray(profile?.allowedMeteoraPools) ? profile.allowedMeteoraPools.map(String) : null;
+
+          const candidates = arr.filter((p: any) => {
+            const mx = String(p?.mint_x || "");
+            const my = String(p?.mint_y || "");
+            const match = (mx === inputMint && my === outputMint) || (mx === outputMint && my === inputMint);
+            if (!match) return false;
+            if (allowedPools && allowedPools.length && !allowedPools.includes(String(p?.address))) return false;
+            return true;
+          });
+
+          if (allowedPairs && allowedPairs.length) {
+            const wanted = new Set(allowedPairs);
+            const filtered = candidates.filter((c: any) => {
+              const n = String(c?.name || "").toUpperCase();
+              return wanted.has(n.replace(/-/g, "/")) || wanted.has(n);
+            });
+            if (!filtered.length) throw new Error("Pair not allowed by profile.allowedPairs");
+            candidates.splice(0, candidates.length, ...filtered);
+          }
+
+          if (!candidates.length) throw new Error("No suitable Meteora pool found");
+
+          const best = candidates
+            .map((c: any) => ({
+              c,
+              liq: Number.isFinite(Number(c?.liquidity)) ? Number(c.liquidity) : 0,
+              verified: c?.is_verified === true,
+            }))
+            .sort((a: any, b: any) => (a.verified !== b.verified ? (a.verified ? -1 : 1) : b.liq - a.liq))[0]?.c;
+
+          poolAddress = String(best.address);
+        }
+
+        const out = await defaultRegistry.get("meteora").buildTx(
+          "meteora.dlmm.swap_exact_in",
+          { poolAddress, inputMint, outputMint, amount, slippageBps },
+          { userPublicKey: kp.publicKey.toBase58(), rpcUrl: getRpcUrl() }
+        );
+
+        ctx.quote = {
+          ok: true,
+          quoteId: `met_${Date.now()}`,
+          requestedSlippageBps: slippageBps,
+          quoteResponse: {
+            inputMint: out.meta.mints?.inputMint,
+            outputMint: out.meta.mints?.outputMint,
+            inAmount: out.meta.amounts?.inAmount,
+            outAmount: out.meta.amounts?.outAmount,
+          },
+        };
+
+        return { ok: true, route: "meteora", poolAddress, txB64: out.txB64, meta: out.meta };
+      },
+    },
     // Balance tool
     {
       name: "solana_balance",
