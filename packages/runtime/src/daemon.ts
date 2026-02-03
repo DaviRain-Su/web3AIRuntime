@@ -751,6 +751,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         });
         trace.emit({ ts: Date.now(), type: "run.finished", runId: traceId, data: { ok: true } });
 
+        const artifact = {
+          chain,
+          adapter,
+          action: String((built as any)?.meta?.action ?? action),
+          params,
+          txB64,
+          simulation,
+          programIds,
+          policy: { decision: decision.decision },
+          traceId,
+          preparedId,
+        };
+        const hash = computeArtifactHash(artifact);
+
         return sendJson(res, 200, {
           ok: true,
           allowed,
@@ -760,6 +774,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           traceId,
           policyReport: decision,
           simulation,
+          hashAlg: hash.hashAlg,
+          artifactHash: hash.artifactHash,
         });
       }
 
