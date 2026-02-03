@@ -36,12 +36,24 @@ function upsertMetric(metrics, row) {
   else metrics.push(row);
 }
 
+import { fetchSolendUsdcUtilizationBps } from './solend_util.js';
+
 async function main() {
   const store = loadStore();
   const metrics = store.metrics;
   const now = new Date().toISOString();
 
-  // v0 placeholders: define the two markets we agreed on.
+  // Solend: compute utilization from on-chain reserve state.
+  let solendUtil = null;
+  try {
+    solendUtil = await fetchSolendUsdcUtilizationBps({
+      rpcUrl: process.env.SOLANA_RPC_URL,
+      apiHost: process.env.SOLEND_API_HOST,
+    });
+  } catch (e) {
+    solendUtil = null;
+  }
+
   upsertMetric(metrics, {
     chain: 'solana',
     protocol: 'solend',
@@ -49,11 +61,12 @@ async function main() {
     tvl_usd: null,
     liquidity_usd: null,
     price_vol_5m_bps: null,
-    borrow_utilization_bps: null,
-    source_url: 'https://api.save.finance/v1/markets/configs?scope=all&deployment=production',
+    borrow_utilization_bps: solendUtil?.utilization_bps ?? null,
+    source_url: solendUtil?.source_url || 'https://api.save.finance/v1/markets/configs?scope=all&deployment=production',
     updated_at: now,
   });
 
+  // Meteora DLMM: SOL/USDC (placeholder; next: compute liquidity + 5m vol)
   upsertMetric(metrics, {
     chain: 'solana',
     protocol: 'meteora',

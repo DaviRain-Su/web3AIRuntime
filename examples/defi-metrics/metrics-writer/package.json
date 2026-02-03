@@ -5,5 +5,14 @@
   "type": "module",
   "scripts": {
     "run": "node writer.js"
+  },
+  "dependencies": {
+    "@solendprotocol/solend-sdk": "^0.14.26",
+    "@solana/web3.js": "1.92.3",
+    "rpc-websockets": "8.0.2"
+  },
+  "overrides": {
+    "@solana/web3.js": "1.92.3",
+    "rpc-websockets": "8.0.2"
   }
 }
