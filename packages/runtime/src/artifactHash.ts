@@ -31,8 +31,15 @@ export function sha256Hex(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
-export function computeArtifactHash(artifact: any): { hashAlg: "sha256"; artifactHash: string; canonicalJson: string } {
+export const ARTIFACT_SCHEMA_VERSION = "v1" as const;
+
+export function computeArtifactHash(artifact: any): {
+  schemaVersion: typeof ARTIFACT_SCHEMA_VERSION;
+  hashAlg: "sha256";
+  artifactHash: string;
+  canonicalJson: string;
+} {
   const canonicalJson = canonicalizeJson(artifact);
   const artifactHash = sha256Hex(canonicalJson);
-  return { hashAlg: "sha256", artifactHash, canonicalJson };
+  return { schemaVersion: ARTIFACT_SCHEMA_VERSION, hashAlg: "sha256", artifactHash, canonicalJson };
 }

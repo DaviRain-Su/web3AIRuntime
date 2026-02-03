@@ -642,6 +642,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             programIdsKnown: known,
             meta: built.meta ?? {},
             policyReport: decision,
+            artifactSchemaVersion: hash.schemaVersion,
             hashAlg: hash.hashAlg,
             artifactHash: hash.artifactHash,
           };
@@ -774,6 +775,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           traceId,
           policyReport: decision,
           simulation,
+          artifactSchemaVersion: hash.schemaVersion,
           hashAlg: hash.hashAlg,
           artifactHash: hash.artifactHash,
         });
