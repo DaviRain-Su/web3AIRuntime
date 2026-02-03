@@ -1,0 +1,19 @@
+name: solana_transfer_simulate_only
+version: "0.1"
+description: Build + simulate a SOL transfer (no broadcast)
+trigger: manual
+stages:
+  - name: build
+    type: simulation
+    actions:
+      - tool: solana_build_transfer_tx
+        params:
+          to: "FM7WTd5Hr7ppp6vu3M4uAspF4DoRjrYPPFvAmqB7H95D" # self-transfer (safe for simulation)
+          amount: 0.000001
+
+  - name: simulate
+    type: simulation
+    actions:
+      - tool: solana_simulate_tx
+        params:
+          txB64: "{{ built.txB64 }}"
