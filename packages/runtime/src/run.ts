@@ -1049,7 +1049,22 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         runId,
         stepId,
         tool: t.name,
-        data: { ...(decision as any), ...(programIds ? { programIds } : {}) },
+        data: {
+          ...(decision as any),
+          ...(programIds ? { programIds } : {}),
+          context: {
+            amountUsd,
+            amountSol,
+            slippageBps,
+            simulatedSlippageBps,
+            expectedOutAmount: quote?.outAmount,
+            simulatedOutAmount: ctx.simulation?.simulatedOutAmount,
+            // helpful when output is SOL and we derived delta from lamports
+            preLamports: ctx.simulation?.preLamports,
+            postLamports: ctx.simulation?.postLamports,
+            feeLamports: ctx.simulation?.feeLamports,
+          },
+        },
       });
 
       if (decision.decision === "block") throw new Error(`Policy blocked: ${decision.code}`);
@@ -1202,6 +1217,21 @@ export async function runWorkflowFromFile(workflowPath: string, opts: RunOptions
 
   const signature = ctx.submitted?.signature || ctx.confirmed?.signature;
 
+  const quote = ctx.quote?.quoteResponse;
+  const expectedOut = quote?.outAmount;
+  const simulatedOut = ctx.simulation?.simulatedOutAmount;
+  let simulatedSlippageBps: number | undefined;
+  try {
+    const expOut = Number(expectedOut);
+    const simOut = Number(simulatedOut);
+    if (Number.isFinite(expOut) && expOut > 0 && Number.isFinite(simOut) && simOut >= 0) {
+      const slip = (expOut - simOut) / expOut;
+      if (Number.isFinite(slip)) simulatedSlippageBps = Math.max(0, Math.round(slip * 10_000));
+    }
+  } catch {
+    // ignore
+  }
+
   const summary = {
     workflow: wf.name,
     ok: true,
@@ -1209,11 +1239,18 @@ export async function runWorkflowFromFile(workflowPath: string, opts: RunOptions
     network: networkHint,
     signature,
     explorerUrl: signature ? `${explorerBase}${signature}` : undefined,
-    quote: ctx.quote?.quoteResponse ? {
-      inAmount: ctx.quote.quoteResponse?.inAmount,
-      outAmount: ctx.quote.quoteResponse?.outAmount,
-      inputMint: ctx.quote.quoteResponse?.inputMint,
-      outputMint: ctx.quote.quoteResponse?.outputMint,
+    quote: quote ? {
+      inAmount: quote?.inAmount,
+      outAmount: quote?.outAmount,
+      inputMint: quote?.inputMint,
+      outputMint: quote?.outputMint,
+      requestedSlippageBps: ctx.quote?.requestedSlippageBps,
+    } : undefined,
+    simulation: ctx.simulation ? {
+      ok: ctx.simulation.ok,
+      unitsConsumed: ctx.simulation.unitsConsumed,
+      simulatedOutAmount: ctx.simulation.simulatedOutAmount,
+      simulatedSlippageBps,
     } : undefined,
   };
 
