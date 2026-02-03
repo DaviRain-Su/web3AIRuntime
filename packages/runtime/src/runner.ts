@@ -21,6 +21,7 @@ import { SolanaAdapter } from "@w3rt/chains";
 
 import { loadMetricsSnapshot } from "./metricsSnapshot.js";
 import { getActiveSolanaRpc, isLikelyRpcError, rotateSolanaRpc } from "./rpcFailover.js";
+import { getActiveJupiterBaseUrl, rotateJupiterBaseUrl } from "./jupiterFailover.js";
 import {
   AddressLookupTableAccount,
   Connection,
@@ -98,8 +99,8 @@ function inferNetworkFromRpcUrl(rpcUrl: string): "mainnet" | "testnet" {
   return "testnet";
 }
 
-function getJupiterBaseUrl(): string {
-  return process.env.W3RT_JUPITER_BASE_URL || "https://api.jup.ag";
+function getJupiterBaseUrl(w3rtDir?: string): string {
+  return getActiveJupiterBaseUrl(w3rtDir);
 }
 
 function getJupiterApiKey(): string | undefined {
@@ -235,6 +236,11 @@ function convertToEngineTool(tool: Tool, learningCtx: LearningCtx): ToolDefiniti
           rotateSolanaRpc(learningCtx.w3rtDir, `${errCode}: ${errMsg}`);
         }
 
+        // Jupiter base URL failover (best-effort)
+        if (tool.name.startsWith("solana_jupiter_") && isLikelyRpcError(e)) {
+          rotateJupiterBaseUrl(learningCtx.w3rtDir, `${errCode}: ${errMsg}`);
+        }
+
         // best-effort: tag known failures with an "applied_fix" if a rule matches.
         const rule = matchRule(rules, {
           tool: tool.name,
@@ -313,7 +319,7 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   const solanaTools = createSolanaTools({
     getRpcUrl: () => resolveSolanaRpc(w3rtDir),
     getKeypair: loadSolanaKeypair,
-    getJupiterBaseUrl: getJupiterBaseUrl,
+    getJupiterBaseUrl: () => getJupiterBaseUrl(w3rtDir),
     getJupiterApiKey: getJupiterApiKey,
   });
 

@@ -384,11 +384,15 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
             retries: 2,
           });
         } catch (e: any) {
-          const msg = `Jupiter quote failed: ${e?.message ?? String(e)}`;
+          const inner = String(e?.message ?? e);
+          const msg = `Jupiter quote failed: ${inner}`;
+          const unauthorized = inner.includes("401") || inner.toLowerCase().includes("unauthorized");
+          const errorCode = unauthorized ? "JUPITER_UNAUTHORIZED" : "JUPITER_QUOTE_FAILED";
+
           // Fallback strategy (MVP): fail-closed unless explicitly allowed.
           // If env W3RT_ALLOW_JUPITER_FALLBACK=1, we allow returning ok:false so workflows can branch.
           if (process.env.W3RT_ALLOW_JUPITER_FALLBACK === "1") {
-            return { ok: false, error: msg, fallback: true };
+            return { ok: false, error: msg, errorCode, fallback: true };
           }
           throw new Error(msg);
         }
