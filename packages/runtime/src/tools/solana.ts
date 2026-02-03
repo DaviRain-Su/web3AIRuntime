@@ -384,7 +384,13 @@ export function createSolanaTools(config: SolanaToolsConfig): Tool[] {
             retries: 2,
           });
         } catch (e: any) {
-          throw new Error(`Jupiter quote failed: ${e?.message ?? String(e)}`);
+          const msg = `Jupiter quote failed: ${e?.message ?? String(e)}`;
+          // Fallback strategy (MVP): fail-closed unless explicitly allowed.
+          // If env W3RT_ALLOW_JUPITER_FALLBACK=1, we allow returning ok:false so workflows can branch.
+          if (process.env.W3RT_ALLOW_JUPITER_FALLBACK === "1") {
+            return { ok: false, error: msg, fallback: true };
+          }
+          throw new Error(msg);
         }
 
         const quoteId = "q_" + crypto.randomBytes(6).toString("hex");
