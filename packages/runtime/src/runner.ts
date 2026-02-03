@@ -20,6 +20,7 @@ import { PolicyEngine, type PolicyConfig, type PolicyContext } from "@w3rt/polic
 import { SolanaAdapter } from "@w3rt/chains";
 
 import { loadMetricsSnapshot } from "./metricsSnapshot.js";
+import { getActiveSolanaRpc, isLikelyRpcError, rotateSolanaRpc } from "./rpcFailover.js";
 import {
   AddressLookupTableAccount,
   Connection,
@@ -78,7 +79,12 @@ export function loadSolanaKeypair(): Keypair | null {
   return null;
 }
 
-export function resolveSolanaRpc(): string {
+export function resolveSolanaRpc(w3rtDir?: string): string {
+  // Prefer configured failover pool if present.
+  // If W3RT_SOLANA_RPC_URLS is set, rpcFailover will pick current active.
+  const active = getActiveSolanaRpc(w3rtDir);
+  if (active) return active;
+
   if (process.env.W3RT_SOLANA_RPC_URL) return process.env.W3RT_SOLANA_RPC_URL;
   const cli = loadSolanaCliConfig();
   if (cli.rpcUrl) return cli.rpcUrl;
@@ -224,6 +230,11 @@ function convertToEngineTool(tool: Tool, learningCtx: LearningCtx): ToolDefiniti
         const errMsg = String(e?.message ?? e);
         const errCode = String(e?.code ?? "ERROR");
 
+        // RPC failover (best-effort): rotate to next endpoint on likely network/RPC errors.
+        if (tool.meta.chain === "solana" && isLikelyRpcError(e)) {
+          rotateSolanaRpc(learningCtx.w3rtDir, `${errCode}: ${errMsg}`);
+        }
+
         // best-effort: tag known failures with an "applied_fix" if a rule matches.
         const rule = matchRule(rules, {
           tool: tool.name,
@@ -300,7 +311,7 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   // Create tools
   const mockTools = createMockTools();
   const solanaTools = createSolanaTools({
-    getRpcUrl: resolveSolanaRpc,
+    getRpcUrl: () => resolveSolanaRpc(w3rtDir),
     getKeypair: loadSolanaKeypair,
     getJupiterBaseUrl: getJupiterBaseUrl,
     getJupiterApiKey: getJupiterApiKey,
@@ -398,7 +409,7 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
     },
 
     onPolicyCheck: async (tool, params, ctx) => {
-      const rpc = tool.meta.chain === "solana" ? resolveSolanaRpc() : "";
+      const rpc = tool.meta.chain === "solana" ? resolveSolanaRpc(w3rtDir) : "";
       const network = tool.meta.chain === "solana" ? inferNetworkFromRpcUrl(rpc) : "mainnet";
 
       // Rate limiting context
@@ -413,7 +424,7 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
       let programIds: string[] | undefined;
       let programIdsKnown: boolean | undefined;
       if (tool.meta.chain === "solana" && typeof params.txB64 === "string") {
-        const result = await extractSolanaProgramIds(params.txB64, resolveSolanaRpc());
+        const result = await extractSolanaProgramIds(params.txB64, resolveSolanaRpc(w3rtDir));
         programIds = result.ids;
         programIdsKnown = result.known;
       }
