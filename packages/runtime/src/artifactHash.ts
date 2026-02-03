@@ -10,6 +10,10 @@ export function canonicalizeJson(value: any): string {
   return JSON.stringify(sortAndClean(value));
 }
 
+export function canonicalizeObject(value: any): any {
+  return sortAndClean(value);
+}
+
 function sortAndClean(v: any): any {
   if (v === undefined) return undefined;
   if (v === null) return null;

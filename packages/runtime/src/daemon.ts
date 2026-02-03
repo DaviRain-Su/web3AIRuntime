@@ -18,7 +18,7 @@ import {
 } from "@solana/web3.js";
 
 import { SolanaDriver, EvmDriver, type ChainDriver } from "./driver/index.js";
-import { computeArtifactHash } from "./artifactHash.js";
+import { computeArtifactHash, canonicalizeObject } from "./artifactHash.js";
 
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
@@ -221,6 +221,12 @@ type Prepared = {
   programIds?: string[];
   programIdsKnown: boolean;
   network: "mainnet" | "devnet" | "testnet" | "unknown";
+
+  // Public verification helpers
+  artifactSchemaVersion?: string;
+  hashAlg?: string;
+  artifactHash?: string;
+  artifactCanonicalJson?: string;
 };
 
 function defaultW3rtDir() {
@@ -596,21 +602,6 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
           const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
           const now = Date.now();
-          prepared.set(preparedId, {
-            preparedId,
-            createdAt: now,
-            expiresAt: now + ttlMs,
-            traceId,
-            chain: "solana",
-            adapter,
-            action,
-            params,
-            txB64,
-            simulation,
-            programIds,
-            programIdsKnown: known,
-            network,
-          });
 
           const artifact = {
             chain,
@@ -626,6 +617,26 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           };
 
           const hash = computeArtifactHash(artifact);
+
+          prepared.set(preparedId, {
+            preparedId,
+            createdAt: now,
+            expiresAt: now + ttlMs,
+            traceId,
+            chain: "solana",
+            adapter,
+            action,
+            params,
+            txB64,
+            simulation,
+            programIds,
+            programIdsKnown: known,
+            network,
+            artifactSchemaVersion: hash.schemaVersion,
+            hashAlg: hash.hashAlg,
+            artifactHash: hash.artifactHash,
+            artifactCanonicalJson: hash.canonicalJson,
+          });
 
           const out = {
             ok: true,
@@ -717,6 +728,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
         const now = Date.now();
 
+        const artifact = {
+          chain,
+          adapter,
+          action: String((built as any)?.meta?.action ?? action),
+          params,
+          txB64,
+          simulation,
+          programIds,
+          policy: { decision: decision.decision },
+          traceId,
+          preparedId,
+        };
+        const hash = computeArtifactHash(artifact);
+
         prepared.set(preparedId, {
           preparedId,
           createdAt: now,
@@ -732,6 +757,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           programIds,
           programIdsKnown: known,
           network,
+          artifactSchemaVersion: hash.schemaVersion,
+          hashAlg: hash.hashAlg,
+          artifactHash: hash.artifactHash,
+          artifactCanonicalJson: hash.canonicalJson,
         });
 
         trace.emit({
@@ -752,20 +781,6 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         });
         trace.emit({ ts: Date.now(), type: "run.finished", runId: traceId, data: { ok: true } });
 
-        const artifact = {
-          chain,
-          adapter,
-          action: String((built as any)?.meta?.action ?? action),
-          params,
-          txB64,
-          simulation,
-          programIds,
-          policy: { decision: decision.decision },
-          traceId,
-          preparedId,
-        };
-        const hash = computeArtifactHash(artifact);
-
         return sendJson(res, 200, {
           ok: true,
           allowed,
@@ -778,6 +793,46 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           artifactSchemaVersion: hash.schemaVersion,
           hashAlg: hash.hashAlg,
           artifactHash: hash.artifactHash,
+        });
+      }
+
+      // Fetch a prepared artifact for verification (hash checking / escrow / attestations).
+      if (req.method === "GET" && url.pathname.startsWith("/v1/artifacts/")) {
+        const preparedId = decodeURIComponent(url.pathname.split("/").pop() || "");
+        if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID" });
+
+        const item = prepared.get(preparedId);
+        if (!item) return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
+        if (item.expiresAt <= Date.now()) {
+          prepared.delete(preparedId);
+          return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
+        }
+
+        // Never include secrets (extra signers) here.
+        const artifact = {
+          chain: item.chain,
+          adapter: item.adapter,
+          action: item.action,
+          params: item.params,
+          txB64: item.txB64,
+          simulation: item.simulation,
+          programIds: item.programIds ?? [],
+          traceId: item.traceId,
+          preparedId: item.preparedId,
+          createdAt: item.createdAt,
+          expiresAt: item.expiresAt,
+        };
+
+        // Recompute hash from canonical artifact object.
+        const canonObj = canonicalizeObject(artifact);
+        const hash = computeArtifactHash(canonObj);
+
+        return sendJson(res, 200, {
+          ok: true,
+          artifactSchemaVersion: hash.schemaVersion,
+          hashAlg: hash.hashAlg,
+          artifactHash: hash.artifactHash,
+          artifact: canonObj,
         });
       }
 
