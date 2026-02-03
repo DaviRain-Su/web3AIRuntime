@@ -26,4 +26,5 @@ allowlist:
     - meteora.dlmm.close_position
     - stable_yield.deposit_usdc
     - stable_yield.withdraw_usdc
+    - solana.solend.deposit_usdc
 rules: []

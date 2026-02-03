@@ -17,7 +17,7 @@ import {
   type Commitment,
 } from "@solana/web3.js";
 
-import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
+import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 import { TraceStore } from "@w3rt/trace";
 
@@ -223,7 +223,7 @@ function notFound(res: http.ServerResponse) {
 }
 
 function registerAdapters() {
-  for (const a of [jupiterAdapter, meteoraDlmmAdapter]) {
+  for (const a of [jupiterAdapter, meteoraDlmmAdapter, solendAdapter]) {
     try {
       defaultRegistry.register(a);
     } catch {
@@ -309,12 +309,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             tvlUsd: 50_000_000,
             exit: { kind: "instant" },
             risk: "low",
-            notes: "MVP placeholder. Replace with a real lending integration (e.g. Kamino/Solend).",
+            notes: "MVP placeholder. Replace with a real lending integration (e.g. Solend).",
             requiredActions: [
               {
-                adapter: "stable-yield",
-                action: "stable_yield.deposit_usdc",
-                params: { amountUsd },
+                adapter: "solend",
+                action: "solana.solend.deposit_usdc",
+                params: { amountBase: String(Math.max(0, Math.floor(amountUsd * 1_000_000))) },
               },
             ],
           },
@@ -331,9 +331,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             notes: "MVP placeholder. Replace with a real vault integration.",
             requiredActions: [
               {
-                adapter: "stable-yield",
-                action: "stable_yield.deposit_usdc",
-                params: { amountUsd },
+                adapter: "solend",
+                action: "solana.solend.deposit_usdc",
+                params: { amountBase: String(Math.max(0, Math.floor(amountUsd * 1_000_000))) },
               },
             ],
           },
@@ -367,9 +367,13 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               tvlUsd: 50_000_000,
               exit: { kind: "instant" },
               risk: "low",
-              notes: "MVP placeholder. Replace with a real lending integration (e.g. Kamino/Solend).",
+              notes: "MVP placeholder. Replace with a real lending integration (e.g. Solend).",
               requiredActions: [
-                { adapter: "stable-yield", action: "stable_yield.deposit_usdc", params: { amountUsd } },
+                {
+                  adapter: "solend",
+                  action: "solana.solend.deposit_usdc",
+                  params: { amountBase: String(Math.max(0, Math.floor(amountUsd * 1_000_000))) },
+                },
               ],
             },
             {
@@ -384,7 +388,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               risk: "medium",
               notes: "MVP placeholder. Replace with a real vault integration.",
               requiredActions: [
-                { adapter: "stable-yield", action: "stable_yield.deposit_usdc", params: { amountUsd } },
+                {
+                  adapter: "solend",
+                  action: "solana.solend.deposit_usdc",
+                  params: { amountBase: String(Math.max(0, Math.floor(amountUsd * 1_000_000))) },
+                },
               ],
             },
           ];
@@ -421,13 +429,45 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, { ok: true, plan });
       }
 
-      // MVP: Compile plan -> build a placeholder transaction -> simulate+policy+trace.
-      // This is the bridge from "strategy planning" to our execution core.
+      // Composable: stable-yield "prepare" should return an action plan (DAG), not a chain-specific tx.
+      // Use /v1/plan/compile to compile plans into PreparedTx artifacts.
       if (req.method === "POST" && url.pathname === "/v1/strategies/stable-yield/prepare") {
         const body = await readJsonBody(req);
         const amountUsd = Number(body.amountUsd ?? 0);
         const stableMint = String(body.stableMint ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
         const riskPreference = String(body.risk ?? "low");
+
+        const planId = `plan_${crypto.randomUUID().slice(0, 16)}`;
+        const amountBase = String(Math.max(0, Math.floor(amountUsd * 1_000_000))); // USDC base units
+
+        // For now we only support USDC deposit via Solend as the real integration.
+        // Future: add swap action when stableMint != USDC, multi-step DAG, multi-chain strategies.
+        const plan = {
+          id: planId,
+          kind: "stable_yield",
+          chain: "solana",
+          mode: "deposit",
+          input: { amountUsd, stableMint, riskPreference },
+          actions: [
+            {
+              chain: "solana",
+              adapter: "solend",
+              action: "solana.solend.deposit_usdc",
+              params: { amountBase },
+            },
+          ],
+        };
+
+        return sendJson(res, 200, { ok: true, plan, next: { compile: "/v1/plan/compile" } });
+      }
+
+      // Compile a plan (list/DAG of action intents) into chain-specific prepared artifacts.
+      // For now: sequential compile for Solana; future: DAG execution + multi-chain drivers.
+      if (req.method === "POST" && url.pathname === "/v1/plan/compile") {
+        const body = await readJsonBody(req);
+        const actions = Array.isArray(body.actions) ? body.actions : [];
+
+        if (!actions.length) return sendJson(res, 400, { ok: false, error: "MISSING_ACTIONS" });
 
         const kp = loadSolanaKeypair();
         if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
@@ -438,98 +478,109 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
-        trace.emit({ ts: Date.now(), type: "run.started", runId: traceId, data: { mode: "stable_yield.prepare", network, amountUsd, riskPreference } });
+        trace.emit({ ts: Date.now(), type: "run.started", runId: traceId, data: { mode: "plan.compile", network, count: actions.length } });
 
-        // Choose an opportunity (reuse mock logic from plan)
-        const opps = [
-          { id: "solana:lending:mock-a", name: "Lending (mock)", apy: 0.06, risk: "low" },
-          { id: "solana:vault:mock-b", name: "Vault (mock)", apy: 0.075, risk: "medium" },
-        ];
-        const candidates = riskPreference === "low" ? opps.filter((o) => o.risk === "low") : opps;
-        const chosen = candidates[0] ?? opps[0];
+        const results: any[] = [];
 
-        // Compile plan -> Solend deposit tx (real)
-        const amountBase = String(Math.max(0, Math.floor(amountUsd * 1_000_000))); // USDC base units
+        for (const [idx, a] of actions.entries()) {
+          const adapter = String(a.adapter || "");
+          const action = String(a.action || "");
+          const params = (a.params ?? {}) as Dict;
+          const chain = String(a.chain || "solana");
+          if (chain !== "solana") {
+            results.push({ ok: false, error: "UNSUPPORTED_CHAIN", chain, adapter, action });
+            continue;
+          }
 
-        const built = await solendPrepareDepositTx({
-          rpcUrl,
-          userPublicKey: kp.publicKey.toBase58(),
-          amountBase,
-          symbol: "USDC",
-        });
+          // build tx
+          const built = await defaultRegistry.get(adapter).buildTx(action, params, {
+            userPublicKey: kp.publicKey.toBase58(),
+            rpcUrl,
+          });
 
-        const txB64 = built.txB64;
-        const simulation: NonNullable<Prepared["simulation"]> = built.simulation ?? { ok: true };
+          const txB64 = built.txB64;
 
-        const { programIds, known } = await extractSolanaProgramIdsFromTxB64(txB64, rpcUrl);
+          // simulate
+          let simulation: NonNullable<Prepared["simulation"]> = { ok: true };
+          try {
+            const raw = Buffer.from(txB64, "base64");
+            const vtx = VersionedTransaction.deserialize(raw);
+            const sim = await conn.simulateTransaction(vtx, {
+              sigVerify: false,
+              replaceRecentBlockhash: true,
+              commitment: "confirmed",
+            } as any);
 
-        // Policy (sideEffect none)
-        const actionName = "stable_yield.deposit_usdc";
-        const decision = policy
-          ? policy.decide({
-              chain: "solana",
-              network,
-              action: actionName,
-              sideEffect: "none",
-              simulationOk: simulation.ok,
-              programIdsKnown: known,
-              programIds,
-            } as any)
-          : { decision: "allow" };
+            if (sim.value.err) {
+              simulation = {
+                ok: false,
+                err: sim.value.err,
+                logs: sim.value.logs ?? [],
+                unitsConsumed: sim.value.unitsConsumed ?? null,
+              };
+            } else {
+              simulation = { ok: true, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
+            }
+          } catch (e: any) {
+            simulation = { ok: false, logs: [String(e?.message ?? e)] };
+          }
 
-        const requiresApproval = decision.decision === "confirm";
-        const allowed = decision.decision === "allow" || decision.decision === "confirm";
+          const { programIds, known } = await extractSolanaProgramIdsFromTxB64(txB64, rpcUrl);
 
-        const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
-        const now = Date.now();
-        prepared.set(preparedId, {
-          preparedId,
-          createdAt: now,
-          expiresAt: now + ttlMs,
-          traceId,
-          chain: "solana",
-          adapter: "stable-yield",
-          action: actionName,
-          params: { amountUsd, stableMint },
-          txB64,
-          simulation,
-          programIds,
-          programIdsKnown: known,
-          network,
-        });
+          const decision = policy
+            ? policy.decide({
+                chain: "solana",
+                network,
+                action,
+                sideEffect: "none",
+                simulationOk: simulation.ok,
+                programIdsKnown: known,
+                programIds,
+              } as any)
+            : { decision: "allow" };
 
-        trace.emit({
-          ts: Date.now(),
-          type: "step.finished",
-          runId: traceId,
-          stepId: "prepare",
-          data: {
+          const requiresApproval = decision.decision === "confirm";
+          const allowed = decision.decision === "allow" || decision.decision === "confirm";
+
+          const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
+          const now = Date.now();
+          prepared.set(preparedId, {
+            preparedId,
+            createdAt: now,
+            expiresAt: now + ttlMs,
+            traceId,
+            chain: "solana",
+            adapter,
+            action,
+            params,
+            txB64,
+            simulation,
+            programIds,
+            programIdsKnown: known,
+            network,
+          });
+
+          results.push({
             ok: true,
-            strategy: { kind: "stable_yield", chosen, amountUsd, stableMint },
-            compiledActions: [{ action: actionName, params: { amountUsd, stableMint } }],
-            simulation: { ok: simulation.ok, unitsConsumed: simulation.unitsConsumed ?? null },
-            policy: decision,
-          },
-        });
+            index: idx,
+            adapter,
+            action,
+            preparedId,
+            allowed,
+            requiresApproval,
+            simulation,
+            programIds,
+            programIdsKnown: known,
+            meta: built.meta ?? {},
+            policyReport: decision,
+          });
+
+          trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: `compile_${idx}`, data: { ok: true, adapter, action, simulationOk: simulation.ok, policy: decision } });
+        }
+
         trace.emit({ ts: Date.now(), type: "run.finished", runId: traceId, data: { ok: true } });
 
-        return sendJson(res, 200, {
-          ok: true,
-          allowed,
-          requiresApproval,
-          preparedId,
-          traceId,
-          plan: {
-            kind: "stable_yield",
-            chain: "solana",
-            mode: "deposit",
-            input: { amountUsd, stableMint, riskPreference },
-            chosenOpportunity: chosen,
-            explanation: `Pick ${chosen.name} with estimated APY ${(chosen.apy * 100).toFixed(2)}% (Solend deposit tx)`
-          },
-          policyReport: decision,
-          simulation,
-        });
+        return sendJson(res, 200, { ok: true, traceId, results });
       }
 
       if (req.method === "POST" && url.pathname === "/v1/actions/prepare") {
