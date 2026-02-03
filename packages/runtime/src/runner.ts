@@ -18,6 +18,8 @@ import {
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig, type PolicyContext } from "@w3rt/policy";
 import { SolanaAdapter } from "@w3rt/chains";
+
+import { loadMetricsSnapshot } from "./metricsSnapshot.js";
 import {
   AddressLookupTableAccount,
   Connection,
@@ -417,6 +419,8 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
       }
 
       // Build policy context
+      const metricsSnap = loadMetricsSnapshot(w3rtDir);
+
       const policyCtx: PolicyContext = {
         chain: tool.meta.chain ?? "unknown",
         network,
@@ -427,6 +431,7 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
         programIdsKnown,
         secondsSinceLastBroadcast,
         broadcastsLastMinute,
+        metrics: metricsSnap.index,
       };
 
       // Add amount/slippage if available

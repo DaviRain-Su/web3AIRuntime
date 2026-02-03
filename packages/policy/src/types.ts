@@ -60,6 +60,10 @@ export interface PolicyContext {
   action: string;
   sideEffect?: "none" | "broadcast";
 
+  // Optional runtime-provided metrics snapshot (arbitrary structured data).
+  // This enables custom rules like: metrics.meteora_sol_usdc.liquidity_usd < 500000
+  metrics?: Record<string, any>;
+
   // Simulation gate: whether we have a successful simulation artifact for the tx.
   simulationOk?: boolean;
 
