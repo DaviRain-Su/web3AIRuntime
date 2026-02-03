@@ -19,6 +19,7 @@
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
     "@w3rt/chains": "workspace:*",
+    "@w3rt/adapters": "workspace:*",
     "@w3rt/policy": "workspace:*",
     "@w3rt/trace": "workspace:*",
     "@w3rt/workflow": "workspace:*",

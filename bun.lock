@@ -10,6 +10,10 @@
         "typescript": "^5.4.5",
       },
     },
+    "packages/adapters": {
+      "name": "@w3rt/adapters",
+      "version": "0.0.0",
+    },
     "packages/chains": {
       "name": "@w3rt/chains",
       "version": "0.0.0",
@@ -48,6 +52,7 @@
       },
       "dependencies": {
         "@solana/web3.js": "^1.98.4",
+        "@w3rt/adapters": "workspace:*",
         "@w3rt/chains": "workspace:*",
         "@w3rt/policy": "workspace:*",
         "@w3rt/trace": "workspace:*",
@@ -92,6 +97,8 @@
     "@types/uuid": ["@types/uuid@8.3.4", "", {}, "sha512-c/I8ZRb51j+pYGAu5CrFMRxqZ2ke4y2grEBO5AUjgSkSk+qT2Ea+OdWElz/OiMf5MNpn2b17kuVBwZLQJXzihw=="],
 
     "@types/ws": ["@types/ws@7.4.7", "", { "dependencies": { "@types/node": "*" } }, "sha512-JQbbmxZTZehdc2iszGKs5oC3NFnjeay7mtAWrdt7qNtAVK0g19muApzAy4bm9byz79xa2ZnO/BOBC2R8RC5Lww=="],
+
+    "@w3rt/adapters": ["@w3rt/adapters@workspace:packages/adapters"],
 
     "@w3rt/chains": ["@w3rt/chains@workspace:packages/chains"],
 

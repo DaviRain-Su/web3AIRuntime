@@ -7,6 +7,7 @@ import yaml from "js-yaml";
 import type { Workflow, WorkflowStage, WorkflowAction } from "@w3rt/workflow";
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
+import { defaultRegistry, jupiterAdapter } from "@w3rt/adapters";
 
 import {
   AddressLookupTableAccount,
@@ -347,6 +348,13 @@ interface Tool {
 }
 
 function createMockTools(): Tool[] {
+  // Register built-in adapters (idempotent)
+  try {
+    defaultRegistry.register(jupiterAdapter);
+  } catch {
+    // ignore duplicate registration
+  }
+
   return [
     // ----- generic mock tools (used by mock-arb.yaml)
     {
@@ -618,6 +626,43 @@ function createMockTools(): Tool[] {
       },
     },
 
+    // ----- generic adapter build tool
+    {
+      name: "solana_adapter_build_tx",
+      meta: { action: "build_tx", sideEffect: "none", chain: "solana", risk: "low" },
+      async execute(params, ctx) {
+        const kp = loadSolanaKeypair();
+        if (!kp) {
+          throw new Error("Missing Solana keypair. Configure Solana CLI keypair or W3RT_SOLANA_PRIVATE_KEY");
+        }
+
+        const adapterId = String(params.adapter);
+        const action = String(params.action);
+        const adapterParams = params.params ?? {};
+
+        const res = await defaultRegistry.get(adapterId).buildTx(action, adapterParams, {
+          userPublicKey: kp.publicKey.toBase58(),
+        });
+
+        // If this is a swap, populate ctx.quote so existing simulation/policy paths work.
+        if (action === "solana.swap_exact_in") {
+          ctx.quote = {
+            ok: true,
+            quoteId: `ad_${adapterId}_${Date.now()}`,
+            requestedSlippageBps: res.meta.slippageBps,
+            quoteResponse: {
+              inputMint: res.meta.mints?.inputMint,
+              outputMint: res.meta.mints?.outputMint,
+              inAmount: res.meta.amounts?.inAmount,
+              outAmount: res.meta.amounts?.outAmount,
+            },
+          };
+        }
+
+        return { ok: true, txB64: res.txB64, meta: res.meta };
+      },
+    },
+
   // ----- solana/jupiter tools (used by solana_swap_exact_in.yaml)
     {
       name: "solana_jupiter_quote",
@@ -666,35 +711,21 @@ function createMockTools(): Tool[] {
         const quote = ctx.__jupQuotes?.[String(params.quoteId)];
         if (!quote) throw new Error(`Unknown quoteId: ${params.quoteId}`);
 
-        const body = {
-          quoteResponse: quote,
-          userPublicKey: kp.publicKey.toBase58(),
-          wrapAndUnwrapSol: true,
-        };
+        // Use adapter path so we validate the interface is correct.
+        // We still keep quoteId flow for backwards compatibility.
+        const out = await defaultRegistry.get("jupiter").buildTx(
+          "solana.swap_exact_in",
+          {
+            inputMint: quote.inputMint,
+            outputMint: quote.outputMint,
+            amount: quote.inAmount,
+            slippageBps: ctx.quote?.requestedSlippageBps ?? 50,
+          },
+          { userPublicKey: kp.publicKey.toBase58() }
+        );
 
-        const base = getJupiterBaseUrl();
-        const apiKey = getJupiterApiKey();
-
-        let out: any;
-        try {
-          out = await fetchJsonWithRetry(new URL("/swap/v1/swap", base), {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              ...(apiKey ? { "x-api-key": apiKey } : {}),
-            },
-            body: JSON.stringify(body),
-            timeoutMs: 15_000,
-            retries: 2,
-          });
-        } catch (e: any) {
-          throw new Error(`Jupiter swap build failed: ${e?.message ?? String(e)}`);
-        }
-
-        const txB64 = out.swapTransaction;
-        if (!txB64) throw new Error("Jupiter response missing swapTransaction");
-
-        return { ok: true, quoteId: params.quoteId, txB64 };
+        // Preserve legacy output shape
+        return { ok: true, quoteId: params.quoteId, txB64: out.txB64, meta: out.meta };
       },
     },
     {
