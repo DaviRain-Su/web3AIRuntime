@@ -17,7 +17,7 @@ import {
   type Commitment,
 } from "@solana/web3.js";
 
-import { SolanaDriver } from "./driver/index.js";
+import { SolanaDriver, EvmDriver, type ChainDriver } from "./driver/index.js";
 
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
@@ -35,6 +35,14 @@ type PlanAction = {
   action?: string;
   params?: Dict;
 };
+
+function makeDriverRegistry(rpcUrl: string): Record<string, ChainDriver> {
+  // Future: allow per-chain rpcUrl overrides in ctx.
+  return {
+    solana: new SolanaDriver(),
+    evm: new EvmDriver(),
+  };
+}
 
 function normalizeActions(raw: any): PlanAction[] {
   const arr = Array.isArray(raw) ? raw : [];
@@ -512,7 +520,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const rpcUrl = resolveSolanaRpc();
         const network = inferNetworkFromRpcUrl(rpcUrl);
         const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
-        const driver = new SolanaDriver();
+        const drivers = makeDriverRegistry(rpcUrl);
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
@@ -541,7 +549,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             continue;
           }
 
-          if (chain !== "solana") {
+          const driver = drivers[chain];
+          if (!driver) {
             const r = { ok: false, id, error: "UNSUPPORTED_CHAIN", chain, adapter, action };
             results.push(r);
             resultById.set(id, r);
@@ -549,10 +558,18 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           }
 
           // build tx
-          const built = await defaultRegistry.get(adapter).buildTx(action, params, {
-            userPublicKey: kp.publicKey.toBase58(),
-            rpcUrl,
-          });
+          let built: any;
+          try {
+            built = await defaultRegistry.get(adapter).buildTx(action, params, {
+              userPublicKey: kp.publicKey.toBase58(),
+              rpcUrl,
+            });
+          } catch (e: any) {
+            const r = { ok: false, id, error: "UNKNOWN_ADAPTER", adapter, action, message: String(e?.message ?? e) };
+            results.push(r);
+            resultById.set(id, r);
+            continue;
+          }
 
           const txB64 = built.txB64;
 
@@ -638,7 +655,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const rpcUrl = resolveSolanaRpc();
         const network = inferNetworkFromRpcUrl(rpcUrl);
         const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
-        const driver = new SolanaDriver();
+        const drivers = makeDriverRegistry(rpcUrl);
+        const driver = drivers[chain];
+        if (!driver) return sendJson(res, 400, { ok: false, error: "UNSUPPORTED_CHAIN" });
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
