@@ -1,9 +1,11 @@
 import http from "node:http";
-import { readFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, mkdirSync, existsSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import yaml from "js-yaml";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import {
   Connection,
@@ -22,6 +24,116 @@ import { TraceStore } from "@w3rt/trace";
 import { loadSolanaKeypair, resolveSolanaRpc } from "./run.js";
 
 type Dict = Record<string, any>;
+
+function findRepoRoot(): string {
+  // Try cwd first (common when running via repo root).
+  const starts = [process.cwd(), dirname(fileURLToPath(import.meta.url))];
+  for (const start of starts) {
+    let cur = start;
+    for (let i = 0; i < 8; i++) {
+      const pj = join(cur, "package.json");
+      if (existsSync(pj)) {
+        try {
+          const j = JSON.parse(readFileSync(pj, "utf-8"));
+          if (j?.name === "web3-ai-runtime" && Array.isArray(j?.workspaces)) return cur;
+        } catch {
+          // ignore
+        }
+      }
+      const parent = dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  }
+  // fallback: assume cwd is good
+  return process.cwd();
+}
+
+function spawnAsync(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; input?: string } = {}): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolveP, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const to = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`spawn timeout after ${opts.timeoutMs ?? 30_000}ms`));
+    }, opts.timeoutMs ?? 30_000);
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout?.on("data", (d) => (stdout += d.toString("utf-8")));
+    child.stderr?.on("data", (d) => (stderr += d.toString("utf-8")));
+
+    child.on("error", (e) => {
+      clearTimeout(to);
+      const err: any = new Error(`spawn failed: ${e.message}`);
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(to);
+      if (code !== 0) {
+        const err: any = new Error(`spawn exit ${code}`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        return reject(err);
+      }
+      resolveP({ stdout, stderr });
+    });
+
+    if (opts.input != null) {
+      child.stdin?.write(opts.input);
+    }
+    child.stdin?.end();
+  });
+}
+
+async function solendPrepareDepositTx(params: {
+  rpcUrl: string;
+  userPublicKey: string;
+  amountBase: string;
+  symbol?: string;
+}): Promise<{ txB64: string; simulation: Prepared["simulation"]; meta?: any; programIds?: string[] }> {
+  const repoRoot = findRepoRoot();
+  const workerDir = join(repoRoot, "packages", "solend-worker");
+  const workerPath = join(workerDir, "worker.js");
+
+  const input = {
+    rpcUrl: params.rpcUrl,
+    userPublicKey: params.userPublicKey,
+    amountBase: params.amountBase,
+    symbol: params.symbol ?? "USDC",
+  };
+
+  const { stdout } = await spawnAsync(process.execPath, [workerPath], {
+    cwd: workerDir,
+    timeoutMs: 60_000,
+    input: JSON.stringify(input),
+  });
+
+  // worker prints single-line JSON
+  const raw = stdout.trim().split("\n").filter(Boolean).pop() ?? "";
+  const j = raw ? JSON.parse(raw) : null;
+  if (!j?.ok) {
+    throw new Error(`solend-worker failed: ${j?.error ?? "UNKNOWN"} ${j?.message ?? ""}`.trim());
+  }
+
+  const simulation: Prepared["simulation"] = j.simulation
+    ? {
+        ok: j.simulation.err == null,
+        err: j.simulation.err ?? undefined,
+        logs: j.simulation.logs ?? [],
+        unitsConsumed: j.simulation.unitsConsumed ?? null,
+      }
+    : undefined;
+
+  return { txB64: String(j.txB64), simulation, meta: j.meta, programIds: j.programIds };
+}
 
 type Prepared = {
   preparedId: string;
@@ -336,44 +448,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const candidates = riskPreference === "low" ? opps.filter((o) => o.risk === "low") : opps;
         const chosen = candidates[0] ?? opps[0];
 
-        // Compile to a placeholder Solana tx:
-        // For MVP we do a 0-lamport self-transfer (safe, simulatable) and attach metadata via trace.
-        const latest = await conn.getLatestBlockhash("confirmed");
-        const ix = SystemProgram.transfer({
-          fromPubkey: kp.publicKey,
-          toPubkey: kp.publicKey,
-          lamports: 0,
+        // Compile plan -> Solend deposit tx (real)
+        const amountBase = String(Math.max(0, Math.floor(amountUsd * 1_000_000))); // USDC base units
+
+        const built = await solendPrepareDepositTx({
+          rpcUrl,
+          userPublicKey: kp.publicKey.toBase58(),
+          amountBase,
+          symbol: "USDC",
         });
-        const msg = new TransactionMessage({
-          payerKey: kp.publicKey,
-          recentBlockhash: latest.blockhash,
-          instructions: [ix],
-        }).compileToV0Message();
-        const vtx = new VersionedTransaction(msg);
 
-        const txB64 = Buffer.from(vtx.serialize()).toString("base64");
+        const txB64 = built.txB64;
+        const simulation: NonNullable<Prepared["simulation"]> = built.simulation ?? { ok: true };
 
-        // Simulate
-        let simulation: NonNullable<Prepared["simulation"]> = { ok: true };
-        try {
-          const sim = await conn.simulateTransaction(vtx, {
-            sigVerify: false,
-            replaceRecentBlockhash: true,
-            commitment: "confirmed",
-          } as any);
-          if (sim.value.err) {
-            simulation = {
-              ok: false,
-              err: sim.value.err,
-              logs: sim.value.logs ?? [],
-              unitsConsumed: sim.value.unitsConsumed ?? null,
-            } as any;
-          } else {
-            simulation = { ok: true, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
-          }
-        } catch (e: any) {
-          simulation = { ok: false, logs: [String(e?.message ?? e)] };
-        }
+        const { programIds, known } = await extractSolanaProgramIdsFromTxB64(txB64, rpcUrl);
 
         // Policy (sideEffect none)
         const actionName = "stable_yield.deposit_usdc";
@@ -384,8 +472,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               action: actionName,
               sideEffect: "none",
               simulationOk: simulation.ok,
-              programIdsKnown: true,
-              programIds: [SystemProgram.programId.toBase58()],
+              programIdsKnown: known,
+              programIds,
             } as any)
           : { decision: "allow" };
 
@@ -405,8 +493,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           params: { amountUsd, stableMint },
           txB64,
           simulation,
-          programIds: [SystemProgram.programId.toBase58()],
-          programIdsKnown: true,
+          programIds,
+          programIdsKnown: known,
           network,
         });
 
@@ -437,7 +525,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             mode: "deposit",
             input: { amountUsd, stableMint, riskPreference },
             chosenOpportunity: chosen,
-            explanation: `Pick ${chosen.name} with estimated APY ${(chosen.apy * 100).toFixed(2)}% (MVP placeholder tx)`
+            explanation: `Pick ${chosen.name} with estimated APY ${(chosen.apy * 100).toFixed(2)}% (Solend deposit tx)`
           },
           policyReport: decision,
           simulation,
