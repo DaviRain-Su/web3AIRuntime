@@ -700,12 +700,70 @@ function createMockTools(): Tool[] {
     {
       name: "solana_simulate_tx",
       meta: { action: "simulate", sideEffect: "none", chain: "solana", risk: "low" },
-      async execute(params) {
+      async execute(params, ctx) {
         const rpc = resolveSolanaRpc();
         const conn = new Connection(rpc, { commitment: "processed" as Commitment });
 
         const raw = Buffer.from(String(params.txB64), "base64");
         const tx = VersionedTransaction.deserialize(raw);
+
+        // Optional: derive a simulated output amount for Jupiter swaps.
+        // This lets policy compare quote.outAmount vs simulatedOutAmount.
+        let simMeta: any = {};
+        try {
+          const quote = ctx.quote?.quoteResponse;
+          const kp = loadSolanaKeypair();
+          if (quote && kp) {
+            const outputMint = new PublicKey(String(quote.outputMint));
+            const owner = kp.publicKey;
+            const outAta = getAssociatedTokenAddressSync(outputMint, owner);
+
+            // Fetch pre-sim balance from chain (best-effort).
+            let preAmount = 0n;
+            try {
+              const bal = await conn.getTokenAccountBalance(outAta, "processed");
+              preAmount = BigInt(bal.value.amount);
+            } catch {
+              preAmount = 0n;
+            }
+
+            const sim = await conn.simulateTransaction(tx, {
+              sigVerify: false,
+              replaceRecentBlockhash: true,
+              commitment: "processed",
+              accounts: {
+                addresses: [outAta.toBase58()],
+                encoding: "jsonParsed",
+              },
+            } as any);
+
+            if (sim.value.err) {
+              return { ok: false, err: sim.value.err, logs: sim.value.logs ?? [] };
+            }
+
+            const postAcc = sim.value.accounts?.[0] as any;
+            const postAmountStr = postAcc?.data?.parsed?.info?.tokenAmount?.amount;
+            const postAmount = typeof postAmountStr === "string" ? BigInt(postAmountStr) : preAmount;
+            const delta = postAmount - preAmount;
+
+            simMeta = {
+              outputMint: outputMint.toBase58(),
+              outAta: outAta.toBase58(),
+              preOutAmount: preAmount.toString(),
+              postOutAmount: postAmount.toString(),
+              simulatedOutAmount: delta > 0n ? delta.toString() : "0",
+            };
+
+            return {
+              ok: true,
+              unitsConsumed: sim.value.unitsConsumed ?? null,
+              logs: sim.value.logs ?? [],
+              ...simMeta,
+            };
+          }
+        } catch {
+          // fall through to plain simulation
+        }
 
         const sim = await conn.simulateTransaction(tx, {
           sigVerify: false,
@@ -721,6 +779,7 @@ function createMockTools(): Tool[] {
           ok: true,
           unitsConsumed: sim.value.unitsConsumed ?? null,
           logs: sim.value.logs ?? [],
+          ...simMeta,
         };
       },
     },
@@ -900,6 +959,19 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         if (USD_MINTS_6.has(mint) && Number.isFinite(amtUi)) amountUsd = amtUi;
       }
 
+      // Simulation-derived implied slippage (best-effort): compare quote.outAmount vs simulatedOutAmount.
+      let simulatedSlippageBps: number | undefined;
+      try {
+        const expOut = Number(quote?.outAmount);
+        const simOut = Number(ctx.simulation?.simulatedOutAmount);
+        if (Number.isFinite(expOut) && expOut > 0 && Number.isFinite(simOut) && simOut >= 0) {
+          const slip = (expOut - simOut) / expOut;
+          if (Number.isFinite(slip)) simulatedSlippageBps = Math.max(0, Math.round(slip * 10_000));
+        }
+      } catch {
+        // ignore
+      }
+
       const decision = engine.decide({
         chain: t.meta.chain ?? "unknown",
         network,
@@ -910,6 +982,7 @@ async function runAction(action: WorkflowAction, tools: Map<string, Tool>, ctx: 
         programIdsKnown,
         amountUsd,
         slippageBps: typeof slippageBps === "number" ? slippageBps : undefined,
+        simulatedSlippageBps,
         secondsSinceLastBroadcast,
         broadcastsLastMinute,
         amountSol,

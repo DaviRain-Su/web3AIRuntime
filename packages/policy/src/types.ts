@@ -61,7 +61,11 @@ export interface PolicyContext {
   simulationOk?: boolean;
 
   amountUsd?: number;
-  slippageBps?: number;
+  slippageBps?: number; // requested slippage
+
+  // If we can derive from simulation + quote, the implied slippage vs quote.
+  simulatedSlippageBps?: number;
+
   programIds?: string[];
   programIdsKnown?: boolean;
   tokenMints?: string[];

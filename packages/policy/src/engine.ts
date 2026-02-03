@@ -113,11 +113,15 @@ export class PolicyEngine {
       };
     }
 
-    if (typeof ctx.slippageBps === "number" && ctx.slippageBps > this.config.transactions.maxSlippageBps) {
+    // Prefer simulation-derived slippage if available (more reality-based than requested).
+    const slippageToCheck = typeof ctx.simulatedSlippageBps === "number" ? ctx.simulatedSlippageBps : ctx.slippageBps;
+    const slippageLabel = typeof ctx.simulatedSlippageBps === "number" ? "Simulated slippage" : "Requested slippage";
+
+    if (typeof slippageToCheck === "number" && slippageToCheck > this.config.transactions.maxSlippageBps) {
       return {
         decision: "confirm",
-        code: "SLIPPAGE_HIGH",
-        message: `High slippage: ${(ctx.slippageBps / 100).toFixed(2)}%`,
+        code: typeof ctx.simulatedSlippageBps === "number" ? "SIMULATED_SLIPPAGE_HIGH" : "SLIPPAGE_HIGH",
+        message: `${slippageLabel}: ${(slippageToCheck / 100).toFixed(2)}%`,
         confirmationKey: "slippage_high",
       };
     }
