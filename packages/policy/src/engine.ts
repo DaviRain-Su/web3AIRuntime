@@ -114,6 +114,21 @@ export class PolicyEngine {
     }
 
     // Prefer simulation-derived slippage if available (more reality-based than requested).
+    const requireSimSlip = this.config.transactions.requireSimulatedSlippageOnMainnet === true;
+    if (
+      requireSimSlip &&
+      ctx.network === "mainnet" &&
+      ctx.sideEffect === "broadcast" &&
+      ctx.action === "swap" &&
+      typeof ctx.simulatedSlippageBps !== "number"
+    ) {
+      return {
+        decision: "block",
+        code: "SIMULATED_SLIPPAGE_REQUIRED",
+        message: "Mainnet swap requires simulation-derived slippage estimate before broadcasting",
+      };
+    }
+
     const slippageToCheck = typeof ctx.simulatedSlippageBps === "number" ? ctx.simulatedSlippageBps : ctx.slippageBps;
     const slippageLabel = typeof ctx.simulatedSlippageBps === "number" ? "Simulated slippage" : "Requested slippage";
 

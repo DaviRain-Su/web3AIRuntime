@@ -26,6 +26,9 @@ export interface PolicyConfig {
 
     // Solana-specific absolute size limits (deterministic, no price feed)
     maxSingleSol?: number;
+
+    // If enabled, require a simulation-derived slippage estimate for mainnet swap broadcasts.
+    requireSimulatedSlippageOnMainnet?: boolean;
   };
   allowlist: {
     solanaPrograms?: string[];

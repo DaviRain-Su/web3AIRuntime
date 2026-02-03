@@ -15,6 +15,7 @@ transactions:
   cooldownSeconds: 60
   maxTxPerMinute: 1
   maxSingleSol: 0.25
+  requireSimulatedSlippageOnMainnet: true
 allowlist:
   solanaPrograms: []
   tokenMints: []
