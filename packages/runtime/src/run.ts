@@ -7,7 +7,7 @@ import yaml from "js-yaml";
 import type { Workflow, WorkflowStage, WorkflowAction } from "@w3rt/workflow";
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
-import { defaultRegistry, jupiterAdapter } from "@w3rt/adapters";
+import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
 
 import {
   AddressLookupTableAccount,
@@ -349,9 +349,7 @@ interface Tool {
 
 function createMockTools(): Tool[] {
   // Register built-in adapters (idempotent)
-  // NOTE: keep adapter registration minimal here.
-  // Meteora DLMM SDK currently crashes under Node v24 in this environment; register it elsewhere when supported.
-  for (const a of [jupiterAdapter]) {
+  for (const a of [jupiterAdapter, meteoraDlmmAdapter]) {
     try {
       defaultRegistry.register(a);
     } catch {

@@ -7,7 +7,7 @@ import yaml from "js-yaml";
 
 import { Connection, Keypair, PublicKey, VersionedTransaction, type Commitment } from "@solana/web3.js";
 
-import { defaultRegistry, jupiterAdapter } from "@w3rt/adapters";
+import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 import { TraceStore } from "@w3rt/trace";
 
@@ -103,9 +103,7 @@ function notFound(res: http.ServerResponse) {
 }
 
 function registerAdapters() {
-  // Keep adapter registration minimal.
-  // Meteora DLMM SDK currently crashes under Node v24 in this environment; register it elsewhere when supported.
-  for (const a of [jupiterAdapter]) {
+  for (const a of [jupiterAdapter, meteoraDlmmAdapter]) {
     try {
       defaultRegistry.register(a);
     } catch {

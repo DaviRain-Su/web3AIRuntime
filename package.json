@@ -10,6 +10,8 @@
     "test": "bun run --workspaces test",
     "lint": "bun run --workspaces lint",
 
+    "postinstall": "node ./scripts/disable-bigint-buffer-native.cjs",
+
     "pi": "pi -e packages/host-pi/dist/pi-extension.js",
     "check:src": "./scripts/check-no-build-artifacts-in-src.sh"
   },
