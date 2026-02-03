@@ -41,6 +41,13 @@ import { fetchSolendUsdcReserveState } from './solend_util.js';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { parsePriceData } from '@pythnetwork/client';
 
+async function fetchJson(url) {
+  const res = await fetch(url);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+  return text ? JSON.parse(text) : null;
+}
+
 async function fetchSolUsdPrice(opts) {
   // Use on-chain Pyth price account (no external HTTP / no API key).
   const rpcUrl = opts?.rpcUrl || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
@@ -111,6 +118,20 @@ async function main() {
     updated_at: now,
   });
 
+  async function fetchMeteoraDlmmPair(poolAddress) {
+    const url = `https://dlmm-api.meteora.ag/pair/${poolAddress}`;
+    const out = await fetchJson(url);
+    const liquidity = out?.liquidity != null ? Number(out.liquidity) : null;
+    return {
+      poolAddress,
+      name: out?.name,
+      liquidity_usd: Number.isFinite(liquidity) ? liquidity : null,
+      // API doesn't expose a dedicated "tvl" field; treat liquidity as TVL proxy for v0.
+      tvl_usd: Number.isFinite(liquidity) ? liquidity : null,
+      source_url: url,
+    };
+  }
+
   // Meteora DLMM: SOL/USDC — use SOL/USD 5m change as a volatility proxy for now.
   let solPrice = null;
   try {
@@ -123,15 +144,24 @@ async function main() {
 
   const vol5mBps = computeVolBpsFromLastTwo(history, 'sol:usd');
 
+  // Default to a high-liquidity SOL/USDC DLMM pool unless overridden.
+  const meteoraPool = process.env.METEORA_DLMM_POOL || 'BVRbyLjjfSBcoyiYFuxbgKYnWuiFaF9CSXEa5vdSZ9Hh';
+  let meteora = null;
+  try {
+    meteora = await fetchMeteoraDlmmPair(meteoraPool);
+  } catch {
+    meteora = null;
+  }
+
   upsertMetric(metrics, {
     chain: 'solana',
     protocol: 'meteora',
     market: 'dlmm:SOL/USDC',
-    tvl_usd: null,
-    liquidity_usd: null,
+    tvl_usd: meteora?.tvl_usd ?? null,
+    liquidity_usd: meteora?.liquidity_usd ?? null,
     price_vol_5m_bps: vol5mBps,
     borrow_utilization_bps: null,
-    source_url: solPrice?.source_url || 'https://meteora.ag (DLMM)',
+    source_url: meteora?.source_url || solPrice?.source_url || 'https://meteora.ag (DLMM)',
     updated_at: now,
   });
 
