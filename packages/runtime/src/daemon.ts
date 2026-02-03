@@ -512,6 +512,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const rpcUrl = resolveSolanaRpc();
         const network = inferNetworkFromRpcUrl(rpcUrl);
         const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+        const driver = new SolanaDriver();
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
@@ -555,32 +556,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
           const txB64 = built.txB64;
 
-          // simulate
-          let simulation: NonNullable<Prepared["simulation"]> = { ok: true };
-          try {
-            const raw = Buffer.from(txB64, "base64");
-            const vtx = VersionedTransaction.deserialize(raw);
-            const sim = await conn.simulateTransaction(vtx, {
-              sigVerify: false,
-              replaceRecentBlockhash: true,
-              commitment: "confirmed",
-            } as any);
+          // simulate (chain driver)
+          const simulation = await driver.simulateTxB64(txB64, { rpcUrl });
 
-            if (sim.value.err) {
-              simulation = {
-                ok: false,
-                err: sim.value.err,
-                logs: sim.value.logs ?? [],
-                unitsConsumed: sim.value.unitsConsumed ?? null,
-              };
-            } else {
-              simulation = { ok: true, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
-            }
-          } catch (e: any) {
-            simulation = { ok: false, logs: [String(e?.message ?? e)] };
-          }
-
-          const driver = new SolanaDriver();
           const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
 
           const decision = policy
@@ -660,6 +638,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const rpcUrl = resolveSolanaRpc();
         const network = inferNetworkFromRpcUrl(rpcUrl);
         const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+        const driver = new SolanaDriver();
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
@@ -675,33 +654,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const txB64 = built.txB64;
         const extraSigners = (built as any).signers as Uint8Array[] | undefined;
 
-        // simulate
-        let simulation: NonNullable<Prepared["simulation"]> = { ok: true };
-        try {
-          const raw = Buffer.from(txB64, "base64");
-          const vtx = VersionedTransaction.deserialize(raw);
-          const sim = await conn.simulateTransaction(vtx, {
-            sigVerify: false,
-            replaceRecentBlockhash: true,
-            commitment: "confirmed",
-          } as any);
-
-          if (sim.value.err) {
-            simulation = {
-              ok: false,
-              err: sim.value.err,
-              logs: sim.value.logs ?? [],
-              unitsConsumed: sim.value.unitsConsumed ?? null,
-            } as any;
-          } else {
-            simulation = { ok: true, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
-          }
-        } catch (e: any) {
-          simulation = { ok: false, logs: [String(e?.message ?? e)] };
-        }
+        // simulate (chain driver)
+        const simulation = await driver.simulateTxB64(txB64, { rpcUrl });
 
         // program ids (best-effort)
-        const driver = new SolanaDriver();
         const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
 
         // policy
