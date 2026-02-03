@@ -32,6 +32,14 @@ import { createSolanaTools } from "./tools/solana.js";
 import { createMetricsTools } from "./tools/metrics.js";
 import type { Tool } from "./tools/types.js";
 
+import {
+  appendLearningEvent,
+  ensureLearningStore,
+  getLearningStore,
+  loadLearningRules,
+  matchRule,
+} from "./learnings/index.js";
+
 // --- Config helpers ---
 
 function defaultW3rtDir() {
@@ -173,7 +181,19 @@ function loadPolicyConfig(w3rtDir: string): PolicyConfig {
 
 // --- Convert our Tool to WorkflowEngine ToolDefinition ---
 
-function convertToEngineTool(tool: Tool): ToolDefinition {
+type LearningCtx = {
+  w3rtDir: string;
+  runId: string;
+  getStage: () => string | undefined;
+};
+
+function convertToEngineTool(tool: Tool, learningCtx: LearningCtx): ToolDefinition {
+  const store = getLearningStore(learningCtx.w3rtDir);
+  ensureLearningStore(store);
+
+  // Load rules once per tool conversion (good enough for now)
+  const rules = loadLearningRules(store);
+
   return {
     name: tool.name,
     meta: {
@@ -182,8 +202,70 @@ function convertToEngineTool(tool: Tool): ToolDefinition {
       chain: tool.meta.chain,
       risk: tool.meta.risk as "low" | "medium" | "high" | undefined,
     },
-    execute: tool.execute,
+    execute: async (params: any, ctx: any) => {
+      const ts = new Date().toISOString();
+      try {
+        const res = await tool.execute(params, ctx);
+        appendLearningEvent(store, {
+          ts,
+          runId: learningCtx.runId,
+          stage: learningCtx.getStage(),
+          tool: tool.name,
+          action: tool.meta.action,
+          chain: tool.meta.chain,
+          ok: !!res?.ok,
+          // Keep small: don't dump huge blobs into learnings by default
+          params: summarizeParams(params),
+        });
+        return res;
+      } catch (e: any) {
+        const errMsg = String(e?.message ?? e);
+        const errCode = String(e?.code ?? "ERROR");
+
+        // best-effort: tag known failures with an "applied_fix" if a rule matches.
+        const rule = matchRule(rules, {
+          tool: tool.name,
+          action: tool.meta.action,
+          chain: tool.meta.chain,
+          error_code: errCode,
+          error_message: errMsg,
+        });
+
+        appendLearningEvent(store, {
+          ts,
+          runId: learningCtx.runId,
+          stage: learningCtx.getStage(),
+          tool: tool.name,
+          action: tool.meta.action,
+          chain: tool.meta.chain,
+          ok: false,
+          error_code: errCode,
+          error_message: errMsg,
+          params: summarizeParams(params),
+          applied_fix: rule?.effect?.applied_fix,
+        });
+
+        throw e;
+      }
+    },
   };
+}
+
+function summarizeParams(params: any) {
+  // Avoid leaking secrets and avoid huge writes.
+  if (!params || typeof params !== "object") return params;
+  const out: any = Array.isArray(params) ? [] : {};
+  const keys = Object.keys(params).slice(0, 50);
+  for (const k of keys) {
+    if (k.toLowerCase().includes("secret") || k.toLowerCase().includes("key") || k.toLowerCase().includes("private")) {
+      out[k] = "[redacted]";
+      continue;
+    }
+    const v = (params as any)[k];
+    if (typeof v === "string" && v.length > 500) out[k] = v.slice(0, 500) + "…";
+    else out[k] = v;
+  }
+  return out;
 }
 
 // --- Runner options ---
@@ -225,7 +307,12 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
   const metricsTools = createMetricsTools();
 
   const allTools = [...mockTools, ...solanaTools, ...metricsTools];
-  const toolMap = new Map(allTools.map((t) => [t.name, convertToEngineTool(t)]));
+  const learningCtx: LearningCtx = {
+    w3rtDir,
+    runId,
+    getStage: () => undefined,
+  };
+  const toolMap = new Map(allTools.map((t) => [t.name, convertToEngineTool(t, learningCtx)]));
 
   // Broadcast history for rate limiting
   const histPath = join(w3rtDir, "policy_broadcast_history.json");
@@ -236,6 +323,9 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
     tools: toolMap,
 
     onStageStart: async (stage, ctx) => {
+      // expose current stage to the learning wrapper
+      learningCtx.getStage = () => stage.name;
+
       trace.emit({
         ts: Date.now(),
         type: "step.started",
