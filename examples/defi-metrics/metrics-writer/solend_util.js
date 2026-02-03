@@ -59,5 +59,7 @@ export async function fetchSolendUsdcReserveState(opts = {}) {
     tvl_base,
     utilization_bps,
     decimals: 6,
+    // Useful for deriving SOL/USD via the same oracle stack used by the reserve.
+    pyth_oracle: decoded?.liquidityPythOracle?.toBase58?.() ?? null,
   };
 }

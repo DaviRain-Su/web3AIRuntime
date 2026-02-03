@@ -38,21 +38,27 @@ function upsertMetric(metrics, row) {
 }
 
 import { fetchSolendUsdcReserveState } from './solend_util.js';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { parsePriceData } from '@pythnetwork/client';
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  const text = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
-  return text ? JSON.parse(text) : null;
-}
+async function fetchSolUsdPrice(opts) {
+  // Use on-chain Pyth price account (no external HTTP / no API key).
+  const rpcUrl = opts?.rpcUrl || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+  const pythOracle = opts?.pythOracle;
+  if (!pythOracle) throw new Error('MISSING_PYTH_ORACLE');
 
-async function fetchSolUsdPrice() {
-  // Prefer a free, no-auth price source for the sidecar.
-  // CoinGecko simple price is sufficient for a 5-minute volatility proxy.
-  const out = await fetchJson('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-  const p = out?.solana?.usd;
-  if (typeof p !== 'number') throw new Error('PRICE_NOT_FOUND');
-  return { price: p, source_url: 'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd' };
+  const conn = new Connection(rpcUrl, 'confirmed');
+  const acc = await conn.getAccountInfo(new PublicKey(pythOracle));
+  if (!acc?.data) throw new Error('PYTH_ACCOUNT_NOT_FOUND');
+
+  const priceData = parsePriceData(acc.data);
+  const price = Number(priceData?.price);
+  if (!Number.isFinite(price) || price <= 0) throw new Error('PRICE_NOT_FOUND');
+
+  return {
+    price,
+    source_url: `solana:${pythOracle}`,
+  };
 }
 
 function pushHistory(history, key, point, maxPoints = 24) {
@@ -108,7 +114,8 @@ async function main() {
   // Meteora DLMM: SOL/USDC — use SOL/USD 5m change as a volatility proxy for now.
   let solPrice = null;
   try {
-    solPrice = await fetchSolUsdPrice();
+    // Derive SOL/USD from Solend reserve's Pyth oracle (on-chain).
+    solPrice = await fetchSolUsdPrice({ rpcUrl: solend?.rpcUrl, pythOracle: solend?.pyth_oracle });
     pushHistory(history, 'sol:usd', { ts: now, price: solPrice.price }, 24);
   } catch {
     solPrice = null;
