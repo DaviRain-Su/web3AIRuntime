@@ -19,5 +19,9 @@ transactions:
 allowlist:
   solanaPrograms: []
   tokenMints: []
-  actions: ["swap", "transfer"]
+  actions:
+    - swap
+    - transfer
+    - meteora.dlmm.open_position
+    - meteora.dlmm.close_position
 rules: []

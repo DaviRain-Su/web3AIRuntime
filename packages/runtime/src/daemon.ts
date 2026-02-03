@@ -27,7 +27,7 @@ type Prepared = {
   txB64: string;
   // extra signers (secret keys); NEVER returned to client; memory-only
   extraSigners?: Uint8Array[];
-  simulation?: { ok: boolean; logs?: string[]; unitsConsumed?: number | null };
+  simulation?: { ok: boolean; err?: any; logs?: string[]; unitsConsumed?: number | null };
   programIds?: string[];
   programIdsKnown: boolean;
   network: "mainnet" | "devnet" | "testnet" | "unknown";
@@ -166,7 +166,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const rpcUrl = resolveSolanaRpc();
         const network = inferNetworkFromRpcUrl(rpcUrl);
-        const conn = new Connection(rpcUrl, { commitment: "processed" as Commitment });
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
 
         const traceId = crypto.randomUUID();
         const trace = new TraceStore(w3rtDir);
@@ -183,18 +183,23 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const extraSigners = (built as any).signers as Uint8Array[] | undefined;
 
         // simulate
-        let simulation: Prepared["simulation"] = { ok: true };
+        let simulation: NonNullable<Prepared["simulation"]> = { ok: true };
         try {
           const raw = Buffer.from(txB64, "base64");
           const vtx = VersionedTransaction.deserialize(raw);
           const sim = await conn.simulateTransaction(vtx, {
             sigVerify: false,
             replaceRecentBlockhash: true,
-            commitment: "processed",
+            commitment: "confirmed",
           } as any);
 
           if (sim.value.err) {
-            simulation = { ok: false, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
+            simulation = {
+              ok: false,
+              err: sim.value.err,
+              logs: sim.value.logs ?? [],
+              unitsConsumed: sim.value.unitsConsumed ?? null,
+            } as any;
           } else {
             simulation = { ok: true, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
           }
