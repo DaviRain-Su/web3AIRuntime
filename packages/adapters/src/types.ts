@@ -1,4 +1,4 @@
-export type AdapterChain = "solana";
+export type AdapterChain = "solana" | "evm";
 
 export type AdapterRisk = "low" | "medium" | "high";
 

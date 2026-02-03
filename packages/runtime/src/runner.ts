@@ -36,6 +36,7 @@ import { createMockTools } from "./tools/mock.js";
 import { createSolanaTools } from "./tools/solana.js";
 import { createMetricsTools } from "./tools/metrics.js";
 import { createMeteoraTools } from "./tools/meteora.js";
+import { createEvmTools } from "./tools/evm.js";
 import type { Tool } from "./tools/types.js";
 
 import {
@@ -327,8 +328,9 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
 
   const metricsTools = createMetricsTools();
   const meteoraTools = createMeteoraTools();
+  const evmTools = createEvmTools();
 
-  const allTools = [...mockTools, ...solanaTools, ...metricsTools, ...meteoraTools];
+  const allTools = [...mockTools, ...solanaTools, ...metricsTools, ...meteoraTools, ...evmTools];
   const learningCtx: LearningCtx = {
     w3rtDir,
     runId,
