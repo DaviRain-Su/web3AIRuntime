@@ -150,6 +150,81 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, { ok: true });
       }
 
+      // List all available actions (capabilities) across registered adapters.
+      if (req.method === "GET" && url.pathname === "/v1/actions") {
+        const adapters = defaultRegistry.list().map((a) => {
+          const caps = a.capabilities?.() ?? [];
+          return {
+            id: a.id,
+            chain: a.chain,
+            capabilities: caps,
+          };
+        });
+
+        const actions = adapters.flatMap((a) =>
+          (a.capabilities ?? []).map((c: any) => ({
+            adapter: a.id,
+            chain: a.chain,
+            ...c,
+          }))
+        );
+
+        return sendJson(res, 200, { ok: true, adapters, actions });
+      }
+
+      // MVP: Stable-yield opportunity discovery (mock providers for now)
+      if (req.method === "POST" && url.pathname === "/v1/strategies/stable-yield/discover") {
+        const body = await readJsonBody(req);
+        const amountUsd = Number(body.amountUsd ?? 0);
+        const stableMint = String(body.stableMint ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC
+
+        const opportunities = [
+          {
+            id: "solana:lending:mock-a",
+            chain: "solana",
+            stableMint,
+            name: "Lending (mock) — flexible USDC supply",
+            provider: "mock",
+            apy: 0.06,
+            tvlUsd: 50_000_000,
+            exit: { kind: "instant" },
+            risk: "low",
+            notes: "MVP placeholder. Replace with a real lending integration (e.g. Kamino/Solend).",
+            requiredActions: [
+              {
+                adapter: "stable-yield",
+                action: "stable_yield.deposit_usdc",
+                params: { amountUsd },
+              },
+            ],
+          },
+          {
+            id: "solana:vault:mock-b",
+            chain: "solana",
+            stableMint,
+            name: "Vault (mock) — auto-compound USDC",
+            provider: "mock",
+            apy: 0.075,
+            tvlUsd: 12_000_000,
+            exit: { kind: "instant" },
+            risk: "medium",
+            notes: "MVP placeholder. Replace with a real vault integration.",
+            requiredActions: [
+              {
+                adapter: "stable-yield",
+                action: "stable_yield.deposit_usdc",
+                params: { amountUsd },
+              },
+            ],
+          },
+        ];
+
+        // Basic ranking: higher APY first, then TVL
+        opportunities.sort((a, b) => b.apy - a.apy || b.tvlUsd - a.tvlUsd);
+
+        return sendJson(res, 200, { ok: true, opportunities });
+      }
+
       if (req.method === "POST" && url.pathname === "/v1/actions/prepare") {
         const body = await readJsonBody(req);
         const chain = String(body.chain || "solana");
