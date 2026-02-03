@@ -714,8 +714,62 @@ function createMockTools(): Tool[] {
           const quote = ctx.quote?.quoteResponse;
           const kp = loadSolanaKeypair();
           if (quote && kp) {
-            const outputMint = new PublicKey(String(quote.outputMint));
+            const outputMintStr = String(quote.outputMint);
+            const outputMint = new PublicKey(outputMintStr);
             const owner = kp.publicKey;
+            const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+            // Case A: output is SOL (WSOL mint in Jupiter). Use owner's lamports delta.
+            if (outputMintStr === WSOL_MINT) {
+              const preLamports = await conn.getBalance(owner, "processed");
+
+              const sim = await conn.simulateTransaction(tx, {
+                sigVerify: false,
+                replaceRecentBlockhash: true,
+                commitment: "processed",
+                accounts: {
+                  addresses: [owner.toBase58()],
+                  encoding: "base64",
+                },
+              } as any);
+
+              if (sim.value.err) {
+                return { ok: false, err: sim.value.err, logs: sim.value.logs ?? [] };
+              }
+
+              const postAcc = sim.value.accounts?.[0] as any;
+              const postLamports = typeof postAcc?.lamports === "number" ? postAcc.lamports : preLamports;
+
+              // Fee estimate (best-effort). We add it back so delta represents net SOL received.
+              let feeLamports = 0;
+              try {
+                const fee = await conn.getFeeForMessage(tx.message as any, "processed" as any);
+                feeLamports = fee?.value ?? 0;
+              } catch {
+                feeLamports = 0;
+              }
+
+              const delta = BigInt(postLamports - preLamports + feeLamports);
+              const simulatedOutLamports = delta > 0n ? delta : 0n;
+
+              simMeta = {
+                outputMint: outputMint.toBase58(),
+                owner: owner.toBase58(),
+                preLamports: String(preLamports),
+                postLamports: String(postLamports),
+                feeLamports: String(feeLamports),
+                simulatedOutAmount: simulatedOutLamports.toString(),
+              };
+
+              return {
+                ok: true,
+                unitsConsumed: sim.value.unitsConsumed ?? null,
+                logs: sim.value.logs ?? [],
+                ...simMeta,
+              };
+            }
+
+            // Case B: output is SPL token. Track the output ATA delta.
             const outAta = getAssociatedTokenAddressSync(outputMint, owner);
 
             // Fetch pre-sim balance from chain (best-effort).
