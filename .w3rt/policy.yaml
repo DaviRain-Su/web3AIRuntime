@@ -24,4 +24,6 @@ allowlist:
     - transfer
     - meteora.dlmm.open_position
     - meteora.dlmm.close_position
+    - stable_yield.deposit_usdc
+    - stable_yield.withdraw_usdc
 rules: []

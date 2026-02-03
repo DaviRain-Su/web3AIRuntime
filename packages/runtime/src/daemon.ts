@@ -5,7 +5,15 @@ import os from "node:os";
 import crypto from "node:crypto";
 import yaml from "js-yaml";
 
-import { Connection, Keypair, PublicKey, VersionedTransaction, type Commitment } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  TransactionMessage,
+  VersionedTransaction,
+  type Commitment,
+} from "@solana/web3.js";
 
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
@@ -299,6 +307,141 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         };
 
         return sendJson(res, 200, { ok: true, plan });
+      }
+
+      // MVP: Compile plan -> build a placeholder transaction -> simulate+policy+trace.
+      // This is the bridge from "strategy planning" to our execution core.
+      if (req.method === "POST" && url.pathname === "/v1/strategies/stable-yield/prepare") {
+        const body = await readJsonBody(req);
+        const amountUsd = Number(body.amountUsd ?? 0);
+        const stableMint = String(body.stableMint ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        const riskPreference = String(body.risk ?? "low");
+
+        const kp = loadSolanaKeypair();
+        if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+
+        const traceId = crypto.randomUUID();
+        const trace = new TraceStore(w3rtDir);
+        trace.emit({ ts: Date.now(), type: "run.started", runId: traceId, data: { mode: "stable_yield.prepare", network, amountUsd, riskPreference } });
+
+        // Choose an opportunity (reuse mock logic from plan)
+        const opps = [
+          { id: "solana:lending:mock-a", name: "Lending (mock)", apy: 0.06, risk: "low" },
+          { id: "solana:vault:mock-b", name: "Vault (mock)", apy: 0.075, risk: "medium" },
+        ];
+        const candidates = riskPreference === "low" ? opps.filter((o) => o.risk === "low") : opps;
+        const chosen = candidates[0] ?? opps[0];
+
+        // Compile to a placeholder Solana tx:
+        // For MVP we do a 0-lamport self-transfer (safe, simulatable) and attach metadata via trace.
+        const latest = await conn.getLatestBlockhash("confirmed");
+        const ix = SystemProgram.transfer({
+          fromPubkey: kp.publicKey,
+          toPubkey: kp.publicKey,
+          lamports: 0,
+        });
+        const msg = new TransactionMessage({
+          payerKey: kp.publicKey,
+          recentBlockhash: latest.blockhash,
+          instructions: [ix],
+        }).compileToV0Message();
+        const vtx = new VersionedTransaction(msg);
+
+        const txB64 = Buffer.from(vtx.serialize()).toString("base64");
+
+        // Simulate
+        let simulation: NonNullable<Prepared["simulation"]> = { ok: true };
+        try {
+          const sim = await conn.simulateTransaction(vtx, {
+            sigVerify: false,
+            replaceRecentBlockhash: true,
+            commitment: "confirmed",
+          } as any);
+          if (sim.value.err) {
+            simulation = {
+              ok: false,
+              err: sim.value.err,
+              logs: sim.value.logs ?? [],
+              unitsConsumed: sim.value.unitsConsumed ?? null,
+            } as any;
+          } else {
+            simulation = { ok: true, logs: sim.value.logs ?? [], unitsConsumed: sim.value.unitsConsumed ?? null };
+          }
+        } catch (e: any) {
+          simulation = { ok: false, logs: [String(e?.message ?? e)] };
+        }
+
+        // Policy (sideEffect none)
+        const actionName = "stable_yield.deposit_usdc";
+        const decision = policy
+          ? policy.decide({
+              chain: "solana",
+              network,
+              action: actionName,
+              sideEffect: "none",
+              simulationOk: simulation.ok,
+              programIdsKnown: true,
+              programIds: [SystemProgram.programId.toBase58()],
+            } as any)
+          : { decision: "allow" };
+
+        const requiresApproval = decision.decision === "confirm";
+        const allowed = decision.decision === "allow" || decision.decision === "confirm";
+
+        const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
+        const now = Date.now();
+        prepared.set(preparedId, {
+          preparedId,
+          createdAt: now,
+          expiresAt: now + ttlMs,
+          traceId,
+          chain: "solana",
+          adapter: "stable-yield",
+          action: actionName,
+          params: { amountUsd, stableMint },
+          txB64,
+          simulation,
+          programIds: [SystemProgram.programId.toBase58()],
+          programIdsKnown: true,
+          network,
+        });
+
+        trace.emit({
+          ts: Date.now(),
+          type: "step.finished",
+          runId: traceId,
+          stepId: "prepare",
+          data: {
+            ok: true,
+            strategy: { kind: "stable_yield", chosen, amountUsd, stableMint },
+            compiledActions: [{ action: actionName, params: { amountUsd, stableMint } }],
+            simulation: { ok: simulation.ok, unitsConsumed: simulation.unitsConsumed ?? null },
+            policy: decision,
+          },
+        });
+        trace.emit({ ts: Date.now(), type: "run.finished", runId: traceId, data: { ok: true } });
+
+        return sendJson(res, 200, {
+          ok: true,
+          allowed,
+          requiresApproval,
+          preparedId,
+          traceId,
+          plan: {
+            kind: "stable_yield",
+            chain: "solana",
+            mode: "deposit",
+            input: { amountUsd, stableMint, riskPreference },
+            chosenOpportunity: chosen,
+            explanation: `Pick ${chosen.name} with estimated APY ${(chosen.apy * 100).toFixed(2)}% (MVP placeholder tx)`
+          },
+          policyReport: decision,
+          simulation,
+        });
       }
 
       if (req.method === "POST" && url.pathname === "/v1/actions/prepare") {
