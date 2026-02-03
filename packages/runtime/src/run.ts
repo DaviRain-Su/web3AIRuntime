@@ -7,7 +7,7 @@ import yaml from "js-yaml";
 import type { Workflow, WorkflowStage, WorkflowAction } from "@w3rt/workflow";
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
-import { defaultRegistry, jupiterAdapter } from "@w3rt/adapters";
+import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
 
 import {
   AddressLookupTableAccount,
@@ -349,10 +349,12 @@ interface Tool {
 
 function createMockTools(): Tool[] {
   // Register built-in adapters (idempotent)
-  try {
-    defaultRegistry.register(jupiterAdapter);
-  } catch {
-    // ignore duplicate registration
+  for (const a of [jupiterAdapter, meteoraDlmmAdapter]) {
+    try {
+      defaultRegistry.register(a);
+    } catch {
+      // ignore duplicate registration
+    }
   }
 
   return [
@@ -642,7 +644,14 @@ function createMockTools(): Tool[] {
 
         const res = await defaultRegistry.get(adapterId).buildTx(action, adapterParams, {
           userPublicKey: kp.publicKey.toBase58(),
+          rpcUrl: resolveSolanaRpc(),
         });
+
+        // Stash extra signers (do not return / trace)
+        if ((res as any).signers && Array.isArray((res as any).signers)) {
+          (ctx as any).__extraSigners = (res as any).signers;
+          delete (res as any).signers;
+        }
 
         // If this is a swap, populate ctx.quote so existing simulation/policy paths work.
         if (action === "solana.swap_exact_in") {
@@ -871,7 +880,7 @@ function createMockTools(): Tool[] {
     {
       name: "solana_send_tx",
       meta: { action: "swap", sideEffect: "broadcast", chain: "solana", risk: "high" },
-      async execute(params) {
+      async execute(params, ctx) {
         const kp = loadSolanaKeypair();
         if (!kp) {
           throw new Error(
@@ -884,7 +893,10 @@ function createMockTools(): Tool[] {
 
         const raw = Buffer.from(String(params.txB64), "base64");
         const tx = VersionedTransaction.deserialize(raw);
-        tx.sign([kp]);
+
+        const extra = (ctx as any)?.__extraSigners as Uint8Array[] | undefined;
+        const extraKps = Array.isArray(extra) ? extra.map((sk) => Keypair.fromSecretKey(sk)) : [];
+        tx.sign([kp, ...extraKps]);
 
         const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
         return { ok: true, signature: sig };

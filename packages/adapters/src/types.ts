@@ -32,6 +32,10 @@ export interface BuildTxResult {
   ok: true;
   txB64: string;
   meta: AdapterMeta;
+
+  // Optional additional signers required for the transaction (e.g. creating a new position account).
+  // IMPORTANT: runtimes should NOT log or persist these secrets.
+  signers?: Uint8Array[];
 }
 
 export interface AdapterContext {

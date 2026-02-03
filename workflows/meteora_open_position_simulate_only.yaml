@@ -1,0 +1,26 @@
+name: meteora_open_position_simulate_only
+version: "0.1"
+description: Meteora DLMM open position (build+simulate only; no broadcast)
+trigger: manual
+stages:
+  - name: build
+    type: simulation
+    actions:
+      - tool: solana_adapter_build_tx
+        params:
+          adapter: "meteora"
+          action: "meteora.dlmm.open_position"
+          params:
+            # defaults to a high-liquidity SOL/USDC pool if omitted
+            widthPct: 5
+            # NOTE: amounts are base units for token X/Y as required by DLMM SDK.
+            # Start tiny for simulation.
+            totalXAmount: "1000"
+            totalYAmount: "1000"
+
+  - name: simulate
+    type: simulation
+    actions:
+      - tool: solana_simulate_tx
+        params:
+          txB64: "{{ built.txB64 }}"
