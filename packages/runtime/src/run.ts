@@ -8,6 +8,7 @@ import type { Workflow, WorkflowStage, WorkflowAction } from "@w3rt/workflow";
 import { TraceStore } from "@w3rt/trace";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter } from "@w3rt/adapters";
+import { writeMemoryRecord, type MemoryRecordV1 } from "./memoryRecords.js";
 
 import {
   AddressLookupTableAccount,
@@ -434,6 +435,29 @@ function createMockTools(): Tool[] {
       meta: { action: "notify", sideEffect: "none", risk: "low" },
       async execute(params) {
         return { ok: true, message: params.message };
+      },
+    },
+
+    // ----- AgentMemory adapter stubs (local-first)
+    {
+      name: "agentmemory.write",
+      meta: { action: "write", sideEffect: "none", risk: "low" },
+      async execute(params) {
+        const record = params.record as MemoryRecordV1;
+        if (!record || !record.run_id) throw new Error("agentmemory.write: missing record.run_id");
+        const res = writeMemoryRecord(defaultW3rtDir(), record);
+        return { ok: true, ...res };
+      },
+    },
+    {
+      name: "agentmemory.read",
+      meta: { action: "read", sideEffect: "none", risk: "low" },
+      async execute(params) {
+        const runId = String(params.run_id || params.runId || "");
+        if (!runId) throw new Error("agentmemory.read: missing run_id");
+        const p = join(defaultW3rtDir(), "memory_records", `${runId}.json`);
+        const raw = readFileSync(p, "utf-8");
+        return { ok: true, record: JSON.parse(raw) };
       },
     },
 

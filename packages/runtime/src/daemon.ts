@@ -19,6 +19,7 @@ import {
 
 import { SolanaDriver, EvmDriver, type ChainDriver } from "./driver/index.js";
 import { computeArtifactHash, canonicalizeObject } from "./artifactHash.js";
+import { writeMemoryRecord } from "./memoryRecords.js";
 
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
 import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
@@ -781,6 +782,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         });
         trace.emit({ ts: Date.now(), type: "run.finished", runId: traceId, data: { ok: true } });
 
+        // Local AgentMemory payload (best-effort). For now, we use artifactHash as the reasoning_hash placeholder.
+        try {
+          writeMemoryRecord(w3rtDir, {
+            run_id: traceId,
+            reasoning_hash: hash.artifactHash,
+            artifacts_hash: hash.artifactHash,
+            policy_decision: String(decision.decision ?? "allow"),
+            outcome: decision.decision === "block" ? "fail" : "success",
+            ts: new Date().toISOString(),
+          });
+        } catch {
+          // best-effort
+        }
+
         return sendJson(res, 200, {
           ok: true,
           allowed,
@@ -875,6 +890,21 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         if (decision.decision === "block") {
           trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: "execute", data: { ok: false, policy: decision } });
+
+          // Local AgentMemory payload (best-effort)
+          try {
+            writeMemoryRecord(defaultW3rtDir(), {
+              run_id: traceId,
+              reasoning_hash: String(item.artifactHash ?? ""),
+              artifacts_hash: String(item.artifactHash ?? ""),
+              policy_decision: String(decision.decision ?? "block"),
+              outcome: "fail",
+              ts: new Date().toISOString(),
+            });
+          } catch {
+            // best-effort
+          }
+
           return sendJson(res, 403, { ok: false, error: "POLICY_BLOCK", policyReport: decision, traceId });
         }
 
@@ -892,6 +922,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
 
         trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: "execute", data: { ok: true, signature: sig } });
+
+        // Local AgentMemory payload (best-effort)
+        try {
+          writeMemoryRecord(defaultW3rtDir(), {
+            run_id: traceId,
+            reasoning_hash: String(item.artifactHash ?? ""),
+            artifacts_hash: String(item.artifactHash ?? ""),
+            policy_decision: String(decision.decision ?? "allow"),
+            outcome: "success",
+            ts: new Date().toISOString(),
+          });
+        } catch {
+          // best-effort
+        }
 
         // one-shot use by default
         prepared.delete(preparedId);

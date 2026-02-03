@@ -10,6 +10,9 @@ export { runWorkflow, type RunnerOptions } from "./runner.js";
 // Tools
 export * from "./tools/index.js";
 
+// Memory record payloads (AgentMemory adapter)
+export * from "./memoryRecords.js";
+
 // Commands
 export * from "./trace_cmd.js";
 export * from "./replay_cmd.js";
