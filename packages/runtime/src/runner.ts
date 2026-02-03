@@ -29,6 +29,7 @@ import {
 
 import { createMockTools } from "./tools/mock.js";
 import { createSolanaTools } from "./tools/solana.js";
+import { createMetricsTools } from "./tools/metrics.js";
 import type { Tool } from "./tools/types.js";
 
 // --- Config helpers ---
@@ -221,7 +222,9 @@ export async function runWorkflow(workflowPath: string, opts: RunnerOptions = {}
     getJupiterApiKey: getJupiterApiKey,
   });
 
-  const allTools = [...mockTools, ...solanaTools];
+  const metricsTools = createMetricsTools();
+
+  const allTools = [...mockTools, ...solanaTools, ...metricsTools];
   const toolMap = new Map(allTools.map((t) => [t.name, convertToEngineTool(t)]));
 
   // Broadcast history for rate limiting
