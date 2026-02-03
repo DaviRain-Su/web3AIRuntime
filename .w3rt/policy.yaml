@@ -1,3 +1,9 @@
+# w3rt policy configuration (repo-local example)
+# The runtime reads policy from ~/.w3rt/policy.yaml by default.
+# Custom rules can reference `metrics.<key>.<field>`.
+# Keys are `${protocol}_${market}` normalized to lowercase and underscores.
+# Example: meteora + "dlmm:SOL/USDC" -> metrics.meteora_dlmm_sol_usdc
+
 networks:
   mainnet:
     enabled: true
@@ -7,24 +13,38 @@ networks:
   testnet:
     enabled: true
     requireApproval: false
+
 transactions:
-  # conservative defaults
-  maxSingleAmountUsd: 50
-  maxSlippageBps: 50
+  maxSingleAmountUsd: 100
+  maxSlippageBps: 100
   requireConfirmation: large
-  cooldownSeconds: 60
-  maxTxPerMinute: 1
-  maxSingleSol: 0.25
-  requireSimulatedSlippageOnMainnet: true
+
+  cooldownSeconds: 10
+  maxTxPerMinute: 5
+
 allowlist:
-  solanaPrograms: []
-  tokenMints: []
   actions:
     - swap
     - transfer
-    - meteora.dlmm.open_position
-    - meteora.dlmm.close_position
-    - stable_yield.deposit_usdc
-    - stable_yield.withdraw_usdc
-    - solana.solend.deposit_usdc
-rules: []
+    - balance
+    - quote
+    - simulate
+    - confirm
+    - metrics.get
+    - metrics.list
+
+rules:
+  - name: meteora_low_liquidity_block
+    condition: "metrics.meteora_dlmm_sol_usdc.liquidity_usd < 500000"
+    action: block
+    message: "Meteora SOL/USDC DLMM liquidity too low (<$500k) — block to avoid poor depth"
+
+  - name: meteora_high_vol_confirm
+    condition: "metrics.meteora_dlmm_sol_usdc.price_vol_5m_bps > 200"
+    action: confirm
+    message: "High 5m volatility on SOL (proxy) (>200 bps) — confirmation required"
+
+  - name: solend_high_util_confirm
+    condition: "metrics.solend_main.borrow_utilization_bps > 9000"
+    action: confirm
+    message: "Solend USDC utilization >90% — confirmation required"
