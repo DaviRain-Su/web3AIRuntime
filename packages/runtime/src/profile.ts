@@ -11,6 +11,12 @@ export type UserProfile = {
   maxSlippageBps: number;
   allowedProtocols: string[];
   requireConfirmOnFallback: boolean;
+
+  // Optional allowlists for safe, user-specific composability.
+  // Examples: ["SOL/USDC", "JUP/USDC"]
+  allowedPairs?: string[];
+  // Optional hard allowlist of pool addresses (stronger than allowedPairs).
+  allowedMeteoraPools?: string[];
 };
 
 function defaultW3rtDir() {
@@ -38,12 +44,17 @@ export function loadUserProfile(w3rtDir?: string): UserProfile {
 
     const requireConfirmOnFallback = j.requireConfirmOnFallback !== false;
 
+    const allowedPairs = Array.isArray(j.allowedPairs) ? j.allowedPairs.map(String) : undefined;
+    const allowedMeteoraPools = Array.isArray(j.allowedMeteoraPools) ? j.allowedMeteoraPools.map(String) : undefined;
+
     return {
       id,
       riskLevel,
       maxSlippageBps: Number.isFinite(maxSlippageBps) ? maxSlippageBps : 100,
       allowedProtocols,
       requireConfirmOnFallback,
+      allowedPairs,
+      allowedMeteoraPools,
     };
   } catch {
     // Safe defaults
@@ -53,6 +64,7 @@ export function loadUserProfile(w3rtDir?: string): UserProfile {
       maxSlippageBps: 100,
       allowedProtocols: ["jupiter", "meteora", "solend"],
       requireConfirmOnFallback: true,
+      allowedPairs: ["SOL/USDC"],
     };
   }
 }
