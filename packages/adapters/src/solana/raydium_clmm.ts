@@ -64,6 +64,7 @@ async function loadClmmPool(params: {
   let tickCache: ReturnTypeFetchMultiplePoolTickArrays;
 
   if (raydium.cluster === "mainnet") {
+    // Mainnet: use API only to *discover* poolId, then use RPC to fetch full keys.
     let id = poolId;
     if (!id) {
       const list = await raydium.api.fetchPoolByMints({
@@ -76,19 +77,21 @@ async function loadClmmPool(params: {
       });
       const arr: any[] = Array.isArray(list) ? list : (list?.data ?? []);
       const found = arr.find((p) => p && isValidClmm(p.programId));
-      if (!found) throw new Error("No Raydium pool found for mints");
+      if (!found) throw new Error("No Raydium CLMM pool found for mints");
       id = String(found.id);
     }
 
-    const data = await raydium.api.fetchPoolById({ ids: id });
-    poolInfo = data[0] as ApiV3PoolInfoConcentratedItem;
-    if (!poolInfo) throw new Error("Raydium API returned no pool info");
+    // RPC provides poolKeys + computePoolInfo + tickData (required for building swap ix).
+    const data = await raydium.clmm.getPoolInfoFromRpc(id);
+    poolInfo = data.poolInfo as ApiV3PoolInfoConcentratedItem;
+    poolKeys = data.poolKeys as ClmmKeys;
+    clmmPoolInfo = data.computePoolInfo as ComputeClmmPoolInfo;
+    tickCache = data.tickData as ReturnTypeFetchMultiplePoolTickArrays;
+
+    if (!poolInfo) throw new Error("Raydium RPC returned no pool info");
     if (!isValidClmm(poolInfo.programId)) throw new Error("Target pool is not CLMM");
 
-    clmmPoolInfo = await PoolUtils.fetchComputeClmmInfo({ connection: raydium.connection, poolInfo });
-    tickCache = await PoolUtils.fetchMultiplePoolTickArrays({ connection: raydium.connection, poolKeys: [clmmPoolInfo] });
-
-    return { poolId: id, poolInfo, poolKeys: undefined, clmmPoolInfo, tickCache };
+    return { poolId: id, poolInfo, poolKeys, clmmPoolInfo, tickCache };
   }
 
   // devnet: rpc only
