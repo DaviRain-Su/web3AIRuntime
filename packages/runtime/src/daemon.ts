@@ -2681,8 +2681,28 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         // best-effort delta summary
         let txSummary: any = null;
+        let receipt: any = null;
         try {
           txSummary = await getSolanaTxDeltaSummary(conn, sig);
+          if (txSummary && txSummary.delta) {
+            const owner = kp.publicKey.toBase58();
+            const toks = Array.isArray(txSummary.delta.tokens) ? txSummary.delta.tokens : [];
+            const mine = toks.filter((t: any) => String(t?.owner ?? "") === owner);
+            const received = mine
+              .filter((t: any) => Number(t?.uiDelta ?? 0) > 0)
+              .sort((a: any, b: any) => Number(b.uiDelta) - Number(a.uiDelta));
+            const spent = mine
+              .filter((t: any) => Number(t?.uiDelta ?? 0) < 0)
+              .sort((a: any, b: any) => Number(a.uiDelta) - Number(b.uiDelta));
+
+            receipt = {
+              owner,
+              feeLamports: txSummary.delta.feeLamports ?? null,
+              feeSol: typeof txSummary.delta.feeLamports === "number" ? txSummary.delta.feeLamports / 1_000_000_000 : null,
+              spent: spent.slice(0, 3).map((t: any) => ({ mint: t.mint, uiDelta: t.uiDelta })),
+              received: received.slice(0, 3).map((t: any) => ({ mint: t.mint, uiDelta: t.uiDelta })),
+            };
+          }
         } catch {
           // ignore
         }
@@ -2717,6 +2737,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             steps: reportSteps,
             txStatus,
             txSummary,
+            receipt,
           };
 
           writeFileSync(join(runDir, "report.json"), JSON.stringify(report, null, 2));
@@ -2733,6 +2754,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           explorerUrl: `https://solana.fm/tx/${sig}`,
           txStatus,
           txSummary,
+          receipt,
         });
       } finally {
         observeRequest("confirm_v0", Date.now() - t0, okReq);
