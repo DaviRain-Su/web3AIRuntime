@@ -307,6 +307,23 @@ function normalizePolicyAction(action: string): string {
   return String(action || "");
 }
 
+function safeParseTx(txB64: string): { recentBlockhash?: string } | null {
+  try {
+    const raw = Buffer.from(txB64, "base64");
+    const tx = VersionedTransaction.deserialize(raw);
+    return { recentBlockhash: (tx.message as any)?.recentBlockhash };
+  } catch {
+    return null;
+  }
+}
+
+async function refreshTxBlockhash(conn: Connection, tx: VersionedTransaction) {
+  const latest = await conn.getLatestBlockhash("confirmed");
+  // Mutate in-place (works for v0 messages)
+  (tx.message as any).recentBlockhash = latest.blockhash;
+  return latest;
+}
+
 // (moved to SolanaDriver)
 
 async function readJsonBody(req: http.IncomingMessage): Promise<any> {
@@ -694,6 +711,13 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const raw = Buffer.from(item.txB64, "base64");
         const tx = VersionedTransaction.deserialize(raw);
+
+        // Refresh blockhash right before sending to avoid "Blockhash not found" if it expired.
+        const latest = await refreshTxBlockhash(conn, tx);
+        // keep for optional confirmation wait
+        item.recentBlockhash = latest.blockhash;
+        item.lastValidBlockHeight = latest.lastValidBlockHeight;
+
         const extra = Array.isArray(item.extraSigners) ? item.extraSigners : [];
         const extraKps = extra.map((sk) => Keypair.fromSecretKey(sk));
         tx.sign([kp, ...extraKps]);
@@ -1153,6 +1177,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         };
         const hash = computeArtifactHash(artifact);
 
+        // capture blockhash (mostly for debugging)
+        const parsed = safeParseTx(txB64);
+
         prepared.set(preparedId, {
           preparedId,
           createdAt: now,
@@ -1163,6 +1190,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           action,
           params,
           txB64,
+          recentBlockhash: parsed?.recentBlockhash,
           extraSigners,
           simulation,
           programIds,
@@ -1325,6 +1353,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         // sign + send
         const raw = Buffer.from(item.txB64, "base64");
         const tx = VersionedTransaction.deserialize(raw);
+
+        // Refresh blockhash right before sending to avoid "Blockhash not found" if it expired.
+        await refreshTxBlockhash(conn, tx);
+
         const extra = Array.isArray(item.extraSigners) ? item.extraSigners : [];
         const extraKps = extra.map((sk) => Keypair.fromSecretKey(sk));
         tx.sign([kp, ...extraKps]);
