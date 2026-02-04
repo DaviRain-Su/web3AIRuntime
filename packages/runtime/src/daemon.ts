@@ -531,7 +531,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
       // metrics
       if (req.method === "GET" && url.pathname === "/v1/metrics") {
-        snapshotAdapterBackoff();
+        // best-effort snapshot (in case adapter backoff isn't initialized yet)
+        try {
+          snapshotAdapterBackoff();
+        } catch {
+          // ignore
+        }
         return sendJson(res, 200, { ok: true, ...metrics, now: new Date().toISOString() });
       }
 
