@@ -2638,7 +2638,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         // Persist execute artifact (best-effort)
         try {
-          const runDir = join(defaultW3rtDir(), "runs", traceId);
+          const runDir = join(w3rtDir, "runs", traceId);
           mkdirSync(runDir, { recursive: true });
           writeFileSync(join(runDir, "execute.json"), JSON.stringify({ ok: true, runId: traceId, preparedId, signature: sig }, null, 2));
         } catch {
@@ -2712,7 +2712,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         // Write a user-facing execution report (best-effort)
         try {
-          const runDir = join(defaultW3rtDir(), "runs", traceId);
+          const runDir = join(w3rtDir, "runs", traceId);
           mkdirSync(runDir, { recursive: true });
           const st = loadRunStatus(traceId);
           const steps = st?.steps ?? {};
@@ -3382,11 +3382,34 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       }
       }
 
+      // runs: fetch report/status/plan
+      // GET /v1/runs/<runId>/report | /status | /plan
+      if (req.method === "GET" && url.pathname.startsWith("/v1/runs/")) {
+        const parts = url.pathname.split("/").filter(Boolean); // ["v1","runs",runId,kind]
+        const runId = decodeURIComponent(parts[2] ?? "");
+        const kind = String(parts[3] ?? "");
+        if (!runId) return sendJson(res, 400, { ok: false, error: "MISSING_RUN_ID" });
+        if (!kind) return sendJson(res, 400, { ok: false, error: "MISSING_KIND", hint: "Use /v1/runs/<runId>/report|status|plan" });
+
+        const base = join(w3rtDir, "runs", runId);
+        const file =
+          kind === "report" ? join(base, "report.json") : kind === "status" ? join(base, "status.json") : kind === "plan" ? join(base, "plan.json") : null;
+        if (!file) return sendJson(res, 404, { ok: false, error: "UNKNOWN_KIND", kind });
+
+        try {
+          const raw = readFileSync(file, "utf-8");
+          const json = JSON.parse(raw);
+          return sendJson(res, 200, { ok: true, runId, kind, data: json });
+        } catch {
+          return sendJson(res, 404, { ok: false, error: "RUN_FILE_NOT_FOUND", runId, kind });
+        }
+      }
+
       if (req.method === "GET" && url.pathname.startsWith("/v1/traces/")) {
         const traceId = decodeURIComponent(url.pathname.split("/").pop() || "");
         if (!traceId) return sendJson(res, 400, { ok: false, error: "MISSING_TRACE_ID" });
 
-        const p = join(defaultW3rtDir(), "runs", traceId, "trace.jsonl");
+        const p = join(w3rtDir, "runs", traceId, "trace.jsonl");
         try {
           const raw = readFileSync(p, "utf-8");
           const lines = raw
