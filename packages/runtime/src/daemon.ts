@@ -1060,6 +1060,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const quote = await fetchJsonWithRetry(quoteUrl.toString(), {
             headers: apiKey ? { "x-api-key": apiKey } : undefined,
           });
+          recordAdapterEvent("jupiter", "ok");
           return { ok: true, quote };
         } catch (e: any) {
           // If an (optional) API key/base is misconfigured, fall back to public Jupiter.
@@ -1073,18 +1074,78 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               u.searchParams.set("amount", amount);
               u.searchParams.set("slippageBps", String(slippageBps));
               const quote = await fetchJsonWithRetry(u.toString(), { headers: undefined });
+              recordAdapterEvent("jupiter", "ok");
               return { ok: true, quote };
             } catch (e2: any) {
+              recordAdapterEvent("jupiter", is429Error(e2) ? "429" : isTimeoutError(e2) ? "timeout" : "fail");
               return { ok: false, error: "QUOTE_FAILED", message: String(e2?.message ?? e2) };
             }
           }
+          recordAdapterEvent("jupiter", is429Error(e) ? "429" : isTimeoutError(e) ? "timeout" : "fail");
           return { ok: false, error: "QUOTE_FAILED", message: msg };
         }
       }
 
+      type AdapterEventKind = "ok" | "fail" | "429" | "timeout";
+      type AdapterEvent = { ts: number; kind: AdapterEventKind };
+
+      const RESOLVE_STATS_WINDOW = 20;
+      const adapterResolveStats = new Map<string, AdapterEvent[]>();
+
       function is429Error(e: any): boolean {
         const msg = String(e?.message ?? e);
         return msg.includes("429") || msg.toLowerCase().includes("too many requests");
+      }
+
+      function isTimeoutError(e: any): boolean {
+        const msg = String(e?.message ?? e);
+        return msg.toLowerCase().includes("timeout") || msg.includes("AbortError") || msg.includes("aborted");
+      }
+
+      function recordAdapterEvent(adapter: string, kind: AdapterEventKind) {
+        const a = String(adapter);
+        const arr = adapterResolveStats.get(a) ?? [];
+        arr.push({ ts: Date.now(), kind });
+        while (arr.length > RESOLVE_STATS_WINDOW) arr.shift();
+        adapterResolveStats.set(a, arr);
+      }
+
+      function computeStabilityPenaltyBps(adapter: string): number {
+        const arr = adapterResolveStats.get(String(adapter)) ?? [];
+        if (!arr.length) return 0;
+
+        let ok = 0,
+          fail = 0,
+          tooMany = 0,
+          timeout = 0;
+        for (const e of arr) {
+          if (e.kind === "ok") ok++;
+          else if (e.kind === "429") tooMany++;
+          else if (e.kind === "timeout") timeout++;
+          else fail++;
+        }
+        const n = arr.length;
+
+        // Penalty heuristic (0..200 bps): failures penalize, 429/timeout penalize more.
+        const bad = fail + 2 * tooMany + 2 * timeout;
+        const bps = Math.round((bad / Math.max(1, n)) * 200);
+        return Math.max(0, Math.min(200, bps));
+      }
+
+      function computeEffectiveOut(q: any): bigint {
+        const minOut = q?.minOutAmount;
+        const out = q?.outAmount;
+        const chosen = minOut != null ? String(minOut) : String(out ?? "0");
+        try {
+          return BigInt(chosen);
+        } catch {
+          return 0n;
+        }
+      }
+
+      function applyPenalty(out: bigint, penaltyBps: number): bigint {
+        const p = BigInt(Math.max(0, Math.min(10_000, 10_000 - penaltyBps)));
+        return (out * p) / 10_000n;
       }
 
       async function withRetry<T>(fn: () => Promise<T>, opts: { retries?: number; baseDelayMs?: number } = {}): Promise<T> {
@@ -1125,6 +1186,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const outAmount = out?.meta?.amounts?.outAmount;
           if (!outAmount) throw new Error("Meteora quote missing outAmount");
 
+          recordAdapterEvent("meteora", "ok");
           return {
             ok: true,
             quote: {
@@ -1135,6 +1197,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             },
           };
         } catch (e: any) {
+          const kind: AdapterEventKind = is429Error(e) ? "429" : isTimeoutError(e) ? "timeout" : "fail";
+          recordAdapterEvent("meteora", kind);
           return { ok: false, error: "QUOTE_FAILED", message: String(e?.message ?? e) };
         }
       }
@@ -1161,6 +1225,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const minOutAmount = (out as any)?.meta?.amounts?.minOutAmount;
           if (!minOutAmount && !outAmount) throw new Error("Raydium quote missing outAmount/minOutAmount");
 
+          recordAdapterEvent("raydium", "ok");
           return {
             ok: true,
             quote: {
@@ -1174,6 +1239,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             },
           };
         } catch (e: any) {
+          const kind: AdapterEventKind = is429Error(e) ? "429" : isTimeoutError(e) ? "timeout" : "fail";
+          recordAdapterEvent("raydium", kind);
           return { ok: false, error: "QUOTE_FAILED", message: String(e?.message ?? e) };
         }
       }
@@ -1215,6 +1282,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
           const qJ = await resolveSwapExactInJupiter(params);
+          const jupEff = qJ.ok ? (() => { try { return BigInt(String(qJ.quote?.outAmount ?? "0")); } catch { return 0n; } })() : 0n;
+          const jupPenalty = computeStabilityPenaltyBps("jupiter");
+          const jupScore = applyPenalty(jupEff, jupPenalty);
+
           outQuotes.push({
             id,
             adapter: "jupiter",
@@ -1224,6 +1295,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             explain: qJ.ok
               ? "Jupiter is an aggregator quote (high confidence)"
               : "Jupiter quote failed (often due to missing/invalid API key or base URL)",
+            effectiveOut: jupEff.toString(),
+            stabilityPenaltyBps: jupPenalty,
+            scoreOut: jupScore.toString(),
             error: qJ.error,
             message: qJ.message,
           });
@@ -1237,7 +1311,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               adapter: "jupiter",
               action: "solana.swap_exact_in",
               params,
-              resolvedFrom: { type, chosen: "jupiter" },
+              resolvedFrom: {
+                type,
+                chosen: "jupiter",
+                scoring: "aggregator",
+                scoringBreakdown: {
+                  effectiveOut: jupEff.toString(),
+                  stabilityPenaltyBps: jupPenalty,
+                  scoreOut: jupScore.toString(),
+                },
+              },
             });
             continue;
           }
@@ -1247,6 +1330,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             resolveSwapExactInRaydium(params, ctx),
           ]);
 
+          const meteoraEff = qM.ok ? computeEffectiveOut(qM.quote) : 0n;
+          const meteoraPenalty = computeStabilityPenaltyBps("meteora");
+          const meteoraScore = applyPenalty(meteoraEff, meteoraPenalty);
+
+          const raydiumEff = qR.ok ? computeEffectiveOut(qR.quote) : 0n;
+          const raydiumPenalty = computeStabilityPenaltyBps("raydium");
+          const raydiumScore = applyPenalty(raydiumEff, raydiumPenalty);
+
           outQuotes.push({
             id,
             adapter: "meteora",
@@ -1254,6 +1345,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             quote: qM.quote,
             confidence: qM.ok ? "high" : "low",
             explain: qM.ok ? "Meteora DLMM quote derived from on-chain pool state" : "Meteora quote failed",
+            effectiveOut: meteoraEff.toString(),
+            stabilityPenaltyBps: meteoraPenalty,
+            scoreOut: meteoraScore.toString(),
             error: qM.error,
             message: qM.message,
           });
@@ -1268,6 +1362,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
                   ? "Raydium CLMM quote computed from tick arrays; expectedOut may drift, minOut is safety bound"
                   : "Raydium quote uses conservative minOut")
               : "Raydium quote failed (often RPC 429 / pool fetch)",
+            effectiveOut: raydiumEff.toString(),
+            stabilityPenaltyBps: raydiumPenalty,
+            scoreOut: raydiumScore.toString(),
             error: qR.error,
             message: qR.message,
           });
@@ -1279,14 +1376,17 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
           if (!candidates.length) continue;
 
-          // Choose max outAmount (string base units). Raydium uses conservative minOut.
-          candidates.sort((a, b) => {
-            const ao = BigInt(String(a.q?.outAmount ?? "0"));
-            const bo = BigInt(String(b.q?.outAmount ?? "0"));
-            return bo > ao ? 1 : bo < ao ? -1 : 0;
+          // Score by effectiveOut (prefer minOutAmount) + stability penalty.
+          const scored = candidates.map((c) => {
+            const effectiveOut = computeEffectiveOut(c.q);
+            const penaltyBps = computeStabilityPenaltyBps(c.adapter);
+            const scoreOut = applyPenalty(effectiveOut, penaltyBps);
+            return { ...c, effectiveOut, penaltyBps, scoreOut };
           });
 
-          const chosen = candidates[0];
+          scored.sort((a, b) => (b.scoreOut > a.scoreOut ? 1 : b.scoreOut < a.scoreOut ? -1 : 0));
+
+          const chosen = scored[0];
           resolvedActions.push({
             id,
             dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
@@ -1294,7 +1394,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             adapter: chosen.adapter,
             action: chosen.action,
             params,
-            resolvedFrom: { type, chosen: chosen.adapter, scoring: "maxOutAmount" },
+            resolvedFrom: {
+              type,
+              chosen: chosen.adapter,
+              scoring: "effectiveOut_minus_stability_penalty",
+              scoringBreakdown: {
+                effectiveOut: chosen.effectiveOut.toString(),
+                stabilityPenaltyBps: chosen.penaltyBps,
+                scoreOut: chosen.scoreOut.toString(),
+              },
+            },
           });
         }
 
@@ -1303,6 +1412,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           adapter: a.adapter,
           action: a.action,
           scoring: a?.resolvedFrom?.scoring ?? (a.adapter === "jupiter" ? "aggregator" : "maxOutAmount"),
+          scoringBreakdown: a?.resolvedFrom?.scoringBreakdown ?? null,
         }));
 
         return sendJson(res, 200, {
@@ -1311,7 +1421,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           quotes: outQuotes,
           resolvedActions,
           chosen,
-          explain: "Resolver picks Jupiter when available; otherwise compares venues by outAmount (best-effort).",
+          explain: "Resolver picks Jupiter when available; otherwise compares venues by effectiveOut (prefer minOut) with a stability penalty.",
         });
       }
 
@@ -1349,6 +1459,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
             const qJ = await resolveSwapExactInJupiter(params);
+            const jupEff = qJ.ok ? (() => { try { return BigInt(String(qJ.quote?.outAmount ?? "0")); } catch { return 0n; } })() : 0n;
+            const jupPenalty = computeStabilityPenaltyBps("jupiter");
+            const jupScore = applyPenalty(jupEff, jupPenalty);
+
             quotes.push({
               id,
               adapter: "jupiter",
@@ -1358,6 +1472,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               explain: qJ.ok
                 ? "Jupiter is an aggregator quote (high confidence)"
                 : "Jupiter quote failed (often due to missing/invalid API key or base URL)",
+              effectiveOut: jupEff.toString(),
+              stabilityPenaltyBps: jupPenalty,
+              scoreOut: jupScore.toString(),
               error: qJ.error,
               message: qJ.message,
             });
@@ -1370,7 +1487,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
                 adapter: "jupiter",
                 action: "solana.swap_exact_in",
                 params,
-                resolvedFrom: { type, chosen: "jupiter" },
+                resolvedFrom: {
+                  type,
+                  chosen: "jupiter",
+                  scoring: "aggregator",
+                  scoringBreakdown: {
+                    effectiveOut: jupEff.toString(),
+                    stabilityPenaltyBps: jupPenalty,
+                    scoreOut: jupScore.toString(),
+                  },
+                },
               });
               continue;
             }
@@ -1380,6 +1506,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               resolveSwapExactInRaydium(params, ctx),
             ]);
 
+            const meteoraEff = qM.ok ? computeEffectiveOut(qM.quote) : 0n;
+            const meteoraPenalty = computeStabilityPenaltyBps("meteora");
+            const meteoraScore = applyPenalty(meteoraEff, meteoraPenalty);
+
+            const raydiumEff = qR.ok ? computeEffectiveOut(qR.quote) : 0n;
+            const raydiumPenalty = computeStabilityPenaltyBps("raydium");
+            const raydiumScore = applyPenalty(raydiumEff, raydiumPenalty);
+
             quotes.push({
               id,
               adapter: "meteora",
@@ -1387,6 +1521,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               quote: qM.quote,
               confidence: qM.ok ? "high" : "low",
               explain: qM.ok ? "Meteora DLMM quote derived from on-chain pool state" : "Meteora quote failed",
+              effectiveOut: meteoraEff.toString(),
+              stabilityPenaltyBps: meteoraPenalty,
+              scoreOut: meteoraScore.toString(),
               error: qM.error,
               message: qM.message,
             });
@@ -1401,6 +1538,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
                     ? "Raydium CLMM quote computed from tick arrays; expectedOut may drift, minOut is safety bound"
                     : "Raydium quote uses conservative minOut")
                 : "Raydium quote failed (often RPC 429 / pool fetch)",
+              effectiveOut: raydiumEff.toString(),
+              stabilityPenaltyBps: raydiumPenalty,
+              scoreOut: raydiumScore.toString(),
               error: qR.error,
               message: qR.message,
             });
@@ -1412,13 +1552,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
             if (!candidates.length) continue;
 
-            candidates.sort((a, b) => {
-              const ao = BigInt(String(a.q?.outAmount ?? "0"));
-              const bo = BigInt(String(b.q?.outAmount ?? "0"));
-              return bo > ao ? 1 : bo < ao ? -1 : 0;
+            const scored = candidates.map((c) => {
+              const effectiveOut = computeEffectiveOut(c.q);
+              const penaltyBps = computeStabilityPenaltyBps(c.adapter);
+              const scoreOut = applyPenalty(effectiveOut, penaltyBps);
+              return { ...c, effectiveOut, penaltyBps, scoreOut };
             });
 
-            const chosen = candidates[0];
+            scored.sort((a, b) => (b.scoreOut > a.scoreOut ? 1 : b.scoreOut < a.scoreOut ? -1 : 0));
+
+            const chosen = scored[0];
             resolved.push({
               id,
               dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
@@ -1426,11 +1569,25 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               adapter: chosen.adapter,
               action: chosen.action,
               params,
-              resolvedFrom: { type, chosen: chosen.adapter, scoring: "maxOutAmount" },
+              resolvedFrom: {
+                type,
+                chosen: chosen.adapter,
+                scoring: "effectiveOut_minus_stability_penalty",
+                scoringBreakdown: {
+                  effectiveOut: chosen.effectiveOut.toString(),
+                  stabilityPenaltyBps: chosen.penaltyBps,
+                  scoreOut: chosen.scoreOut.toString(),
+                },
+              },
             });
           }
 
-          resolveInfo = { intentsCount: intents.length, quotes, resolvedActions: resolved, chosen: resolved.map((a) => ({ id: a.id, adapter: a.adapter })) };
+          resolveInfo = {
+            intentsCount: intents.length,
+            quotes,
+            resolvedActions: resolved,
+            chosen: resolved.map((a) => ({ id: a.id, adapter: a.adapter, action: a.action, scoring: a?.resolvedFrom?.scoring ?? null, scoringBreakdown: a?.resolvedFrom?.scoringBreakdown ?? null })),
+          };
           actions = normalizeActions(resolved);
         }
 
