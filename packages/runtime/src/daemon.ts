@@ -23,7 +23,7 @@ import { computeArtifactHash, canonicalizeObject } from "./artifactHash.js";
 import { writeMemoryRecord } from "./memoryRecords.js";
 
 import { defaultRegistry, jupiterAdapter, meteoraDlmmAdapter, solendAdapter } from "@w3rt/adapters";
-import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
+import { PolicyEngine, type PolicyConfig, defaultPolicySpec, policyConfigFromSpec, type PolicySpec } from "@w3rt/policy";
 import { TraceStore } from "@w3rt/trace";
 
 import { loadSolanaKeypair, resolveSolanaRpc } from "./run.js";
@@ -538,6 +538,89 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           // ignore
         }
         return sendJson(res, 200, { ok: true, ...metrics, now: new Date().toISOString() });
+      }
+
+      // policy: natural language -> PolicySpec (deterministic MVP parser)
+      // POST /v1/policy/from_text
+      // Body: { text: string }
+      if (req.method === "POST" && url.pathname === "/v1/policy/from_text") {
+        const body = await readJsonBody(req);
+        const text = String(body?.text ?? "").trim();
+        if (!text) return sendJson(res, 400, { ok: false, error: "MISSING_TEXT" });
+
+        const base = defaultPolicySpec();
+        const warnings: string[] = [];
+
+        // --- small deterministic parser (Chinese/English keywords)
+        // maxSingleAmountUsd
+        {
+          const m = text.match(/(单笔|每笔|单次|per\s*tx|single)\s*[^\d]{0,20}?(\d+(?:\.\d+)?)(\s*)(usd|\$|美元|刀|usdc)?/i);
+          if (m) {
+            const v = Number(m[2]);
+            if (Number.isFinite(v) && v >= 0) base.transactions.maxSingleAmountUsd = v;
+          }
+        }
+
+        // maxSlippageBps
+        {
+          const m = text.match(/(滑点|slippage)\s*[^\d]{0,20}?(\d+(?:\.\d+)?)\s*%/i);
+          if (m) {
+            const pct = Number(m[2]);
+            if (Number.isFinite(pct) && pct >= 0) base.transactions.maxSlippageBps = Math.round(pct * 100);
+          }
+        }
+
+        // requireConfirmation
+        if (/永不确认|不需要确认|never\s*confirm/i.test(text)) base.transactions.requireConfirmation = "never";
+        else if (/总是确认|每次确认|always\s*confirm/i.test(text)) base.transactions.requireConfirmation = "always";
+        else if (/大额确认|large\s*only|only\s*large/i.test(text)) base.transactions.requireConfirmation = "large";
+
+        // actions allowlist hints
+        if (/只允许/i.test(text) || /only\s+allow/i.test(text)) {
+          const actions: string[] = [];
+          if (/swap|兑换|换币|交易/i.test(text)) actions.push("swap");
+          if (/transfer|转账/i.test(text)) actions.push("transfer");
+          if (/balance|余额/i.test(text)) actions.push("balance");
+          if (actions.length) {
+            // keep minimal safe helpers always
+            const keep = ["quote", "simulate", "confirm"];
+            base.allowlist.actions = Array.from(new Set([...actions, ...keep]));
+          } else {
+            warnings.push("Could not infer allowed actions from text; using default allowlist.actions");
+          }
+        }
+
+        // mainnet toggles
+        if (/禁用主网|关闭主网|mainnet\s*off/i.test(text)) base.networks.mainnet.enabled = false;
+        if (/主网必须模拟|require\s*simulation\s*on\s*mainnet/i.test(text)) base.networks.mainnet.requireSimulation = true;
+        if (/主网必须确认|require\s*approval\s*on\s*mainnet/i.test(text)) base.networks.mainnet.requireApproval = true;
+
+        const spec: PolicySpec = base;
+
+        // lightweight validation
+        const errors: string[] = [];
+        if (spec.policySpecVersion !== 1) errors.push("policySpecVersion must be 1");
+        if (!(spec.transactions.maxSlippageBps >= 0 && spec.transactions.maxSlippageBps <= 10000)) errors.push("maxSlippageBps out of range");
+        if (!(spec.transactions.maxSingleAmountUsd >= 0)) errors.push("maxSingleAmountUsd must be >= 0");
+        if (!spec.allowlist || !Array.isArray(spec.allowlist.actions)) errors.push("allowlist.actions must be an array");
+
+        const summary = {
+          networks: spec.networks,
+          transactions: spec.transactions,
+          allowActions: spec.allowlist.actions ?? [],
+        };
+
+        if (errors.length) return sendJson(res, 200, { ok: false, error: "SPEC_INVALID", errors, warnings, spec, summary });
+
+        // also return legacy PolicyConfig for immediate engine consumption
+        let config: PolicyConfig | null = null;
+        try {
+          config = policyConfigFromSpec(spec);
+        } catch (e: any) {
+          return sendJson(res, 200, { ok: false, error: "SPEC_TO_CONFIG_FAILED", message: String(e?.message ?? e), warnings, spec, summary });
+        }
+
+        return sendJson(res, 200, { ok: true, warnings, spec, summary, config });
       }
 
       // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
