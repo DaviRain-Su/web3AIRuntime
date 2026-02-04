@@ -190,7 +190,7 @@ export const raydiumClmmAdapter: Adapter = {
 
     const baseIn = inputMint === poolInfo.mintA.address;
 
-    const { minAmountOut, remainingAccounts } = await PoolUtils.computeAmountOutFormat({
+    const outFmt: any = await PoolUtils.computeAmountOutFormat({
       poolInfo: clmmPoolInfo,
       tickArrayCache: tickCache[resolvedPoolId],
       amountIn: amount,
@@ -198,6 +198,12 @@ export const raydiumClmmAdapter: Adapter = {
       slippage: Math.max(0, Math.min(10_000, Math.floor(slippageBps))) / 10_000,
       epochInfo: await raydium.fetchEpochInfo(),
     } as any);
+
+    const minAmountOut = outFmt?.minAmountOut;
+    const amountOut = outFmt?.amountOut; // best-effort expected out (before slippage)
+    const remainingAccounts = outFmt?.remainingAccounts;
+
+    if (!minAmountOut?.amount?.raw) throw new Error("Raydium computeAmountOutFormat missing minAmountOut");
 
     const { transaction, builder }: any = await raydium.clmm.swap({
       poolInfo,
@@ -231,7 +237,11 @@ export const raydiumClmmAdapter: Adapter = {
         adapter: "raydium",
         action,
         mints: { inputMint, outputMint },
-        amounts: { inAmount: amount.toString(), minOutAmount: String(minAmountOut?.amount?.raw ?? "") },
+        amounts: {
+          inAmount: amount.toString(),
+          outAmount: amountOut?.amount?.raw != null ? String(amountOut.amount.raw) : undefined,
+          minOutAmount: String(minAmountOut?.amount?.raw ?? ""),
+        },
         slippageBps,
         poolId: resolvedPoolId,
         programId: poolInfo.programId,

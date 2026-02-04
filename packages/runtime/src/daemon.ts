@@ -1157,8 +1157,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           );
 
           const inAmount = out?.meta?.amounts?.inAmount;
+          const outAmount = (out as any)?.meta?.amounts?.outAmount;
           const minOutAmount = (out as any)?.meta?.amounts?.minOutAmount;
-          if (!minOutAmount) throw new Error("Raydium quote missing minOutAmount");
+          if (!minOutAmount && !outAmount) throw new Error("Raydium quote missing outAmount/minOutAmount");
 
           return {
             ok: true,
@@ -1166,9 +1167,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               inputMint: out.meta?.mints?.inputMint,
               outputMint: out.meta?.mints?.outputMint,
               inAmount,
-              // Note: conservative (min) amount
-              outAmount: String(minOutAmount),
-              kind: "minOut",
+              // Prefer expected outAmount if available; fall back to conservative minOut.
+              outAmount: String(outAmount ?? minOutAmount),
+              kind: outAmount ? "expectedOut" : "minOut",
+              minOutAmount: minOutAmount != null ? String(minOutAmount) : undefined,
             },
           };
         } catch (e: any) {
