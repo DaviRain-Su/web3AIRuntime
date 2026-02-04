@@ -1197,6 +1197,23 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       const RESOLVE_STATS_WINDOW = 20;
       const adapterResolveStats = new Map<string, AdapterEvent[]>();
 
+      // Simple circuit-breaker cooldown to protect RPC under sustained 429/timeout.
+      const ADAPTER_COOLDOWN_MS = Math.max(0, Number(process.env.W3RT_ADAPTER_COOLDOWN_MS ?? 2500));
+      const adapterBackoffUntil = new Map<string, number>();
+
+      function inAdapterBackoff(adapter: string): boolean {
+        if (ADAPTER_COOLDOWN_MS <= 0) return false;
+        const until = adapterBackoffUntil.get(String(adapter)) ?? 0;
+        return until > Date.now();
+      }
+
+      function tripAdapterBackoff(adapter: string, kind: AdapterEventKind) {
+        if (ADAPTER_COOLDOWN_MS <= 0) return;
+        // only trip on the expensive failure modes
+        if (kind !== "429" && kind !== "timeout") return;
+        adapterBackoffUntil.set(String(adapter), Date.now() + ADAPTER_COOLDOWN_MS);
+      }
+
       function is429Error(e: any): boolean {
         const msg = String(e?.message ?? e);
         return msg.includes("429") || msg.toLowerCase().includes("too many requests");
@@ -1213,6 +1230,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         arr.push({ ts: Date.now(), kind });
         while (arr.length > RESOLVE_STATS_WINDOW) arr.shift();
         adapterResolveStats.set(a, arr);
+
+        // trip short backoff on 429/timeout
+        tripAdapterBackoff(a, kind);
 
         // metrics
         const m = (metrics.adapters[a] = metrics.adapters[a] ?? { ok: 0, fail: 0, r429: 0, timeout: 0 });
@@ -1421,7 +1441,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const rpcUrl = resolveSolanaRpc();
           const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
-          const qJ = await resolveSwapExactInJupiter(params);
+          const qJ = inAdapterBackoff("jupiter")
+            ? { ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "jupiter temporarily backed off due to 429/timeout" }
+            : await resolveSwapExactInJupiter(params);
           const jupEff = qJ.ok ? (() => { try { return BigInt(String(qJ.quote?.outAmount ?? "0")); } catch { return 0n; } })() : 0n;
           const jupPenalty = computeStabilityPenaltyBps("jupiter");
           const jupScore = applyPenalty(jupEff, jupPenalty);
@@ -1479,9 +1501,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             continue;
           }
 
+          const meteoraBackoff = inAdapterBackoff("meteora");
+          const raydiumBackoff = inAdapterBackoff("raydium");
+
           const [qM, qR] = await Promise.all([
-            resolveSwapExactInMeteora(params, ctx),
-            resolveSwapExactInRaydium(params, ctx),
+            meteoraBackoff
+              ? Promise.resolve({ ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "meteora temporarily backed off due to 429/timeout" })
+              : resolveSwapExactInMeteora(params, ctx),
+            raydiumBackoff
+              ? Promise.resolve({ ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "raydium temporarily backed off due to 429/timeout" })
+              : resolveSwapExactInRaydium(params, ctx),
           ]);
 
           const quotesForCache: any[] = [];
@@ -1637,7 +1666,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             const rpcUrl = resolveSolanaRpc();
             const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
-            const qJ = await resolveSwapExactInJupiter(params);
+            const qJ = inAdapterBackoff("jupiter")
+              ? { ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "jupiter temporarily backed off due to 429/timeout" }
+              : await resolveSwapExactInJupiter(params);
             const jupEff = qJ.ok ? (() => { try { return BigInt(String(qJ.quote?.outAmount ?? "0")); } catch { return 0n; } })() : 0n;
             const jupPenalty = computeStabilityPenaltyBps("jupiter");
             const jupScore = applyPenalty(jupEff, jupPenalty);
