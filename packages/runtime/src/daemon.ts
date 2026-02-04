@@ -532,6 +532,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       raydium: { ok: 0, fail: 0, r429: 0, timeout: 0 },
     } as Record<string, any>,
     adapterBackoff: {} as Record<string, any>,
+    policyDecisions: { allow: 0, warn: 0, confirm: 0, block: 0 },
   };
 
   function observeRequest(name: keyof typeof metrics.requests, ms: number, ok: boolean) {
@@ -893,6 +894,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               programIds,
             } as any)
           : { decision: simulation.ok ? "confirm" : "block" };
+
+        // metrics: policy decision
+        if ((metrics as any).policyDecisions && (metrics as any).policyDecisions[decision.decision] != null) {
+          (metrics as any).policyDecisions[decision.decision]++;
+        }
 
         const requiresApproval = decision.decision === "confirm";
         const allowed = decision.decision === "allow" || decision.decision === "confirm";
@@ -2622,6 +2628,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               } as any)
             : { decision: "allow" };
 
+          // metrics: policy decision
+          if ((metrics as any).policyDecisions && (metrics as any).policyDecisions[decision.decision] != null) {
+            (metrics as any).policyDecisions[decision.decision]++;
+          }
+
           const requiresApproval = decision.decision === "confirm";
           const allowed = decision.decision === "allow" || decision.decision === "confirm";
 
@@ -2746,6 +2757,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               programIdsKnown: known,
             } as any)
           : { decision: "allow" };
+
+        // metrics: policy decision
+        if ((metrics as any).policyDecisions && (metrics as any).policyDecisions[decision.decision] != null) {
+          (metrics as any).policyDecisions[decision.decision]++;
+        }
 
         const requiresApproval = decision.decision === "confirm";
         const allowed = decision.decision === "allow" || decision.decision === "confirm";

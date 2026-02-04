@@ -5,11 +5,14 @@ export class PolicyEngine {
   constructor(public readonly config: PolicyConfig) {}
 
   decide(ctx: PolicyContext): PolicyDecision {
+    const reasons: string[] = [];
+
     // 1) network gates
     if (ctx.network === "mainnet") {
       if (!this.config.networks.mainnet.enabled) {
-        return { decision: "block", code: "MAINNET_DISABLED", message: "Mainnet disabled" };
+        return { decision: "block", code: "MAINNET_DISABLED", message: "Mainnet disabled", reasons: ["networks.mainnet.enabled=false"] };
       }
+      reasons.push("network=mainnet");
     }
 
     // 2) mainnet simulation hard gate (for side-effect actions)
@@ -23,6 +26,11 @@ export class PolicyEngine {
         decision: "block",
         code: "SIMULATION_REQUIRED",
         message: "Simulation required before broadcasting on mainnet",
+        reasons: [
+          "networks.mainnet.requireSimulation=true",
+          "sideEffect=broadcast",
+          "simulationOk!=true",
+        ],
       };
     }
 
@@ -33,6 +41,7 @@ export class PolicyEngine {
         decision: "block",
         code: "ACTION_NOT_ALLOWED",
         message: `Action not allowed: ${ctx.action}`,
+        reasons: [`allowlist.actions excludes ${ctx.action}`],
       };
     }
 
@@ -46,6 +55,7 @@ export class PolicyEngine {
             decision: "block",
             code: "PROGRAMS_UNKNOWN",
             message: "Cannot determine Solana program ids for this transaction (ALT lookup failed or missing). Refusing to broadcast.",
+            reasons: ["allowlist.solanaPrograms set", "programIdsKnown!=true"],
           };
         }
 
@@ -56,6 +66,7 @@ export class PolicyEngine {
             decision: "block",
             code: "PROGRAM_NOT_ALLOWED",
             message: `Solana program not allowed: ${notAllowed[0]}`,
+            reasons: ["allowlist.solanaPrograms set", `programId not allowed: ${notAllowed[0]}`],
           };
         }
       }
@@ -75,6 +86,7 @@ export class PolicyEngine {
           decision: "block",
           code: "COOLDOWN_ACTIVE",
           message: `Cooldown active: wait ${Math.ceil(cooldown - ctx.secondsSinceLastBroadcast)}s before broadcasting again`,
+          reasons: ["transactions.cooldownSeconds", `secondsSinceLastBroadcast=${ctx.secondsSinceLastBroadcast}`],
         };
       }
 
@@ -89,6 +101,7 @@ export class PolicyEngine {
           decision: "block",
           code: "RATE_LIMIT",
           message: `Rate limit exceeded: ${ctx.broadcastsLastMinute} broadcasts in last minute (max ${maxPerMin})`,
+          reasons: ["transactions.maxTxPerMinute", `broadcastsLastMinute=${ctx.broadcastsLastMinute}`],
         };
       }
     }
@@ -101,6 +114,7 @@ export class PolicyEngine {
           code: "AMOUNT_SOL_LARGE",
           message: `Large SOL amount: ${ctx.amountSol.toFixed(4)} SOL`,
           confirmationKey: "amount_sol_large",
+          reasons: ["transactions.maxSingleSol", `amountSol=${ctx.amountSol}`],
         };
       }
     }
@@ -111,6 +125,7 @@ export class PolicyEngine {
         code: "AMOUNT_LARGE",
         message: `Large amount: $${ctx.amountUsd.toFixed(2)}`,
         confirmationKey: "amount_large",
+        reasons: ["transactions.maxSingleAmountUsd", `amountUsd=${ctx.amountUsd}`],
       };
     }
 
@@ -129,6 +144,7 @@ export class PolicyEngine {
         decision: "block",
         code: "SIMULATED_SLIPPAGE_REQUIRED",
         message: "Mainnet swap requires simulation-derived slippage estimate before broadcasting",
+        reasons: ["transactions.requireSimulatedSlippageOnMainnet=true", "simulatedSlippageBps missing"],
       };
     }
 
@@ -141,6 +157,7 @@ export class PolicyEngine {
         code: typeof ctx.simulatedSlippageBps === "number" ? "SIMULATED_SLIPPAGE_HIGH" : "SLIPPAGE_HIGH",
         message: `${slippageLabel}: ${(slippageToCheck / 100).toFixed(2)}%`,
         confirmationKey: "slippage_high",
+        reasons: ["transactions.maxSlippageBps", `${slippageLabel}=${slippageToCheck}`],
       };
     }
 
@@ -155,6 +172,7 @@ export class PolicyEngine {
               decision: "block",
               code: `RULE_${ruleResult.ruleName?.toUpperCase() ?? "BLOCKED"}`,
               message,
+              reasons: [`rule:${ruleResult.ruleName}`],
             };
           case "confirm":
             return {
@@ -162,17 +180,19 @@ export class PolicyEngine {
               code: `RULE_${ruleResult.ruleName?.toUpperCase() ?? "CONFIRM"}`,
               message,
               confirmationKey: `rule_${ruleResult.ruleName ?? "confirm"}`,
+              reasons: [`rule:${ruleResult.ruleName}`],
             };
           case "warn":
             return {
               decision: "warn",
               code: `RULE_${ruleResult.ruleName?.toUpperCase() ?? "WARN"}`,
               message,
+              reasons: [`rule:${ruleResult.ruleName}`],
             };
         }
       }
     }
 
-    return { decision: "allow" };
+    return { decision: "allow", reasons };
   }
 }

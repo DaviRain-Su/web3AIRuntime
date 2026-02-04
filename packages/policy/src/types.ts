@@ -50,9 +50,9 @@ export interface PolicyRule {
 
 export type PolicyDecision =
   | { decision: "allow"; reasons?: string[] }
-  | { decision: "warn"; code: string; message: string }
-  | { decision: "confirm"; code: string; message: string; confirmationKey: string }
-  | { decision: "block"; code: string; message: string };
+  | { decision: "warn"; code: string; message: string; reasons?: string[] }
+  | { decision: "confirm"; code: string; message: string; confirmationKey: string; reasons?: string[] }
+  | { decision: "block"; code: string; message: string; reasons?: string[] };
 
 export interface PolicyContext {
   chain: string;
