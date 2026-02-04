@@ -772,6 +772,105 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, out);
       }
 
+      // Solana: get transaction status/details
+      // GET /v1/solana/tx/<signature>
+      if (req.method === "GET" && url.pathname.startsWith("/v1/solana/tx/")) {
+        const signature = decodeURIComponent(url.pathname.split("/").pop() || "").trim();
+        if (!signature) return sendJson(res, 400, { ok: false, error: "MISSING_SIGNATURE" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+
+        // 1) quick status
+        let status: any = null;
+        try {
+          const s = await conn.getSignatureStatuses([signature], { searchTransactionHistory: true });
+          status = s?.value?.[0] ?? null;
+        } catch (e: any) {
+          // ignore
+        }
+
+        // 2) full tx (may be null if not found or pruned)
+        let tx: any = null;
+        try {
+          tx = await conn.getTransaction(signature, {
+            commitment: "confirmed" as Commitment,
+            maxSupportedTransactionVersion: 0,
+          } as any);
+        } catch (e: any) {
+          // ignore
+        }
+
+        // 3) compute a compact balance delta summary (best-effort)
+        const delta: any = {};
+        try {
+          const meta = tx?.meta;
+          if (meta) {
+            // SOL deltas
+            const pre = meta.preBalances ?? [];
+            const post = meta.postBalances ?? [];
+            const keys = (tx?.transaction as any)?.message?.accountKeys ?? [];
+            const solDeltas = [];
+            for (let i = 0; i < Math.min(pre.length, post.length, keys.length); i++) {
+              const d = Number(post[i] ?? 0) - Number(pre[i] ?? 0);
+              if (d !== 0) {
+                solDeltas.push({
+                  account: String(keys[i]?.toBase58 ? keys[i].toBase58() : keys[i]),
+                  lamportsDelta: d,
+                  solDelta: d / 1_000_000_000,
+                });
+              }
+            }
+            delta.sol = solDeltas;
+
+            // token deltas
+            const preTok = meta.preTokenBalances ?? [];
+            const postTok = meta.postTokenBalances ?? [];
+            const byKey = new Map<string, any>();
+            for (const b of preTok) {
+              const k = `${b.owner ?? ""}|${b.mint ?? ""}`;
+              byKey.set(k, { owner: b.owner, mint: b.mint, pre: b.uiTokenAmount, post: null });
+            }
+            for (const b of postTok) {
+              const k = `${b.owner ?? ""}|${b.mint ?? ""}`;
+              const cur = byKey.get(k) ?? { owner: b.owner, mint: b.mint, pre: null, post: null };
+              cur.post = b.uiTokenAmount;
+              byKey.set(k, cur);
+            }
+            const tokenDeltas: any[] = [];
+            for (const v of byKey.values()) {
+              const preAmt = Number(v.pre?.uiAmount ?? 0);
+              const postAmt = Number(v.post?.uiAmount ?? 0);
+              const d = postAmt - preAmt;
+              if (d !== 0) tokenDeltas.push({ owner: v.owner, mint: v.mint, uiDelta: d, pre: v.pre, post: v.post });
+            }
+            delta.tokens = tokenDeltas;
+
+            delta.feeLamports = meta.fee ?? null;
+            delta.err = meta.err ?? null;
+          }
+        } catch {
+          // ignore
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          chain: "solana",
+          network,
+          rpcUrl,
+          signature,
+          status,
+          blockTime: tx?.blockTime ?? null,
+          slot: tx?.slot ?? null,
+          confirmationStatus: status?.confirmationStatus ?? null,
+          err: status?.err ?? null,
+          delta,
+          // return raw tx only when available (may be large)
+          tx,
+        });
+      }
+
       // Solana: transfer prepare (build unsigned tx + simulate + policy + returns preparedId). Does NOT broadcast.
       // POST /v1/solana/transfer/prepare
       if (req.method === "POST" && url.pathname === "/v1/solana/transfer/prepare") {
