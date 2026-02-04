@@ -2032,7 +2032,42 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           // best-effort
         }
 
-        return sendJson(res, 200, { ok: true, signature: sig, traceId, runId: traceId });
+        // Write a user-facing execution report (best-effort)
+        try {
+          const runDir = join(defaultW3rtDir(), "runs", traceId);
+          mkdirSync(runDir, { recursive: true });
+          const st = loadRunStatus(traceId);
+          const steps = st?.steps ?? {};
+          const reportSteps = Object.entries(steps).map(([sid, s]: any) => {
+            const signature = s?.signature ?? null;
+            return {
+              stepId: sid,
+              state: s?.state ?? null,
+              adapter: s?.adapter ?? null,
+              action: s?.action ?? null,
+              preparedId: s?.preparedId ?? null,
+              signature,
+              explorerUrl: signature ? `https://solana.fm/tx/${signature}` : null,
+              summary: s?.summary ?? null,
+              error: s?.error ?? null,
+              message: s?.message ?? null,
+            };
+          });
+
+          const report = {
+            ok: true,
+            runId: traceId,
+            status: st?.status ?? "executed",
+            updatedAt: new Date().toISOString(),
+            steps: reportSteps,
+          };
+
+          writeFileSync(join(runDir, "report.json"), JSON.stringify(report, null, 2));
+        } catch {
+          // best-effort
+        }
+
+        return sendJson(res, 200, { ok: true, signature: sig, traceId, runId: traceId, explorerUrl: `https://solana.fm/tx/${sig}` });
       }
 
       // Compile a plan (list/DAG of action intents) into chain-specific prepared artifacts.
