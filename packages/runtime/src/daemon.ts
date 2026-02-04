@@ -318,6 +318,49 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, { ok: true });
       }
 
+      // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
+      // POST /v1/solana/balance
+      if (req.method === "POST" && url.pathname === "/v1/solana/balance") {
+        const body = await readJsonBody(req);
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+
+        let address = String(body?.address ?? body?.owner ?? "").trim();
+        if (!address) {
+          const kp = loadSolanaKeypair();
+          if (!kp) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: "MISSING_ADDRESS",
+              message: "No address provided and no local Solana keypair configured",
+              hint: "Provide {address} or set W3RT_SOLANA_PRIVATE_KEY / W3RT_SOLANA_KEYPAIR_PATH (or Solana CLI keypair path).",
+            });
+          }
+          address = kp.publicKey.toBase58();
+        }
+
+        let pubkey: PublicKey;
+        try {
+          pubkey = new PublicKey(address);
+        } catch {
+          return sendJson(res, 400, { ok: false, error: "INVALID_ADDRESS", address });
+        }
+
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+        const lamports = await conn.getBalance(pubkey);
+        const sol = lamports / 1_000_000_000;
+
+        return sendJson(res, 200, {
+          ok: true,
+          chain: "solana",
+          network,
+          rpcUrl,
+          address: pubkey.toBase58(),
+          lamports,
+          sol,
+        });
+      }
+
       // List all available actions (capabilities) across registered adapters.
       if (req.method === "GET" && url.pathname === "/v1/actions") {
         const adapters = defaultRegistry.list().map((a) => {
