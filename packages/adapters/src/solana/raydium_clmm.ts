@@ -8,6 +8,7 @@ import {
   TxVersion,
   PoolUtils,
   PoolFetchType,
+  CLMM_PROGRAM_ID,
   type ApiV3PoolInfoConcentratedItem,
   type ClmmKeys,
   type ComputeClmmPoolInfo,
@@ -29,8 +30,8 @@ function assertNumber(x: any, name: string): number {
 }
 
 function isValidClmm(programId: string): boolean {
-  // Best-effort: accept any pubkey-like string.
-  return typeof programId === "string" && programId.length >= 32;
+  // Raydium CLMM program id (mainnet): CAMMCzo...
+  return String(programId) === CLMM_PROGRAM_ID.toBase58();
 }
 
 async function initRaydium(connection: Connection, owner: PublicKey, cluster: "mainnet" | "devnet") {
@@ -70,7 +71,7 @@ async function loadClmmPool(params: {
       const list = await raydium.api.fetchPoolByMints({
         mint1: inputMint,
         mint2: outputMint,
-        type: PoolFetchType.All,
+        type: PoolFetchType.Concentrated,
         sort: "liquidity",
         order: "desc",
         page: 1,
