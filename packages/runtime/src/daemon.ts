@@ -544,7 +544,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const artifact = {
           chain: "solana",
           adapter: "internal",
-          action: "solana.transfer.prepare",
+          // Keep policy action compatible with allowlist: "transfer"
+          action: "transfer",
           params: { to: to.toBase58(), amount: amountUi, tokenMint: tokenMintRaw || null, createAta },
           txB64,
           simulation,
@@ -563,7 +564,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           traceId,
           chain: "solana",
           adapter: "internal",
-          action: "solana.transfer.prepare",
+          action: "transfer",
           params: artifact.params,
           txB64,
           simulation,
@@ -593,6 +594,63 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           hashAlg: hash.hashAlg,
           artifactHash: hash.artifactHash,
         });
+      }
+
+      // Solana: transfer execute (broadcast) by preparedId.
+      // POST /v1/solana/transfer/execute
+      if (req.method === "POST" && url.pathname === "/v1/solana/transfer/execute") {
+        const body = await readJsonBody(req);
+        const preparedId = String(body.preparedId || "");
+        const confirm = body.confirm === true;
+        if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID" });
+        if (!confirm) return sendJson(res, 400, { ok: false, error: "CONFIRM_REQUIRED" });
+
+        // Delegate to the generic execute handler logic by reusing the same storage.
+        const item = prepared.get(preparedId);
+        if (!item) return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
+        if (item.expiresAt <= Date.now()) {
+          prepared.delete(preparedId);
+          return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
+        }
+
+        const kp = loadSolanaKeypair();
+        if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+
+        const traceId = item.traceId;
+        const trace = new TraceStore(defaultW3rtDir());
+
+        const decision = policy
+          ? policy.decide({
+              chain: "solana",
+              network,
+              action: String(item.action),
+              sideEffect: "broadcast",
+              simulationOk: item.simulation?.ok === true,
+              programIds: item.programIds ?? [],
+              programIdsKnown: item.programIdsKnown === true,
+            } as any)
+          : { decision: "allow" };
+
+        if (decision.decision === "block") {
+          trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: "execute", data: { ok: false, policy: decision } });
+          return sendJson(res, 403, { ok: false, error: "POLICY_BLOCK", policyReport: decision, traceId });
+        }
+
+        const raw = Buffer.from(item.txB64, "base64");
+        const tx = VersionedTransaction.deserialize(raw);
+        const extra = Array.isArray(item.extraSigners) ? item.extraSigners : [];
+        const extraKps = extra.map((sk) => Keypair.fromSecretKey(sk));
+        tx.sign([kp, ...extraKps]);
+
+        const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
+        trace.emit({ ts: Date.now(), type: "tx.submitted", runId: traceId, data: { signature: sig } });
+
+        prepared.delete(preparedId);
+        return sendJson(res, 200, { ok: true, signature: sig, traceId, policyReport: decision });
       }
 
       // List all available actions (capabilities) across registered adapters.
