@@ -388,6 +388,83 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function getSolanaTxDeltaSummary(conn: Connection, signature: string): Promise<{
+  blockTime: number | null;
+  slot: number | null;
+  confirmationStatus: string | null;
+  err: any;
+  delta: any;
+} | null> {
+  try {
+    const st = await conn.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    const status = st?.value?.[0] ?? null;
+
+    const tx = await conn.getTransaction(signature, {
+      commitment: "confirmed" as Commitment,
+      maxSupportedTransactionVersion: 0,
+    } as any);
+
+    const delta: any = {};
+    try {
+      const meta = (tx as any)?.meta;
+      if (meta) {
+        const pre = meta.preBalances ?? [];
+        const post = meta.postBalances ?? [];
+        const keys = ((tx as any)?.transaction as any)?.message?.accountKeys ?? [];
+        const solDeltas = [];
+        for (let i = 0; i < Math.min(pre.length, post.length, keys.length); i++) {
+          const d = Number(post[i] ?? 0) - Number(pre[i] ?? 0);
+          if (d !== 0) {
+            solDeltas.push({
+              account: String(keys[i]?.toBase58 ? keys[i].toBase58() : keys[i]),
+              lamportsDelta: d,
+              solDelta: d / 1_000_000_000,
+            });
+          }
+        }
+        delta.sol = solDeltas;
+
+        const preTok = meta.preTokenBalances ?? [];
+        const postTok = meta.postTokenBalances ?? [];
+        const byKey = new Map<string, any>();
+        for (const b of preTok) {
+          const k = `${b.owner ?? ""}|${b.mint ?? ""}`;
+          byKey.set(k, { owner: b.owner, mint: b.mint, pre: b.uiTokenAmount, post: null });
+        }
+        for (const b of postTok) {
+          const k = `${b.owner ?? ""}|${b.mint ?? ""}`;
+          const cur = byKey.get(k) ?? { owner: b.owner, mint: b.mint, pre: null, post: null };
+          cur.post = b.uiTokenAmount;
+          byKey.set(k, cur);
+        }
+        const tokenDeltas: any[] = [];
+        for (const v of byKey.values()) {
+          const preAmt = Number(v.pre?.uiAmount ?? 0);
+          const postAmt = Number(v.post?.uiAmount ?? 0);
+          const d = postAmt - preAmt;
+          if (d !== 0) tokenDeltas.push({ owner: v.owner, mint: v.mint, uiDelta: d, pre: v.pre, post: v.post });
+        }
+        delta.tokens = tokenDeltas;
+
+        delta.feeLamports = meta.fee ?? null;
+        delta.err = meta.err ?? null;
+      }
+    } catch {
+      // ignore
+    }
+
+    return {
+      blockTime: (tx as any)?.blockTime ?? null,
+      slot: (tx as any)?.slot ?? null,
+      confirmationStatus: status?.confirmationStatus ?? null,
+      err: status?.err ?? null,
+      delta,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function registerAdapters() {
   for (const a of [jupiterAdapter, meteoraDlmmAdapter, solendAdapter]) {
     try {
@@ -2602,6 +2679,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           // ignore
         }
 
+        // best-effort delta summary
+        let txSummary: any = null;
+        try {
+          txSummary = await getSolanaTxDeltaSummary(conn, sig);
+        } catch {
+          // ignore
+        }
+
         // Write a user-facing execution report (best-effort)
         try {
           const runDir = join(defaultW3rtDir(), "runs", traceId);
@@ -2631,6 +2716,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             updatedAt: new Date().toISOString(),
             steps: reportSteps,
             txStatus,
+            txSummary,
           };
 
           writeFileSync(join(runDir, "report.json"), JSON.stringify(report, null, 2));
@@ -2646,6 +2732,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           runId: traceId,
           explorerUrl: `https://solana.fm/tx/${sig}`,
           txStatus,
+          txSummary,
         });
       } finally {
         observeRequest("confirm_v0", Date.now() - t0, okReq);
