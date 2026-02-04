@@ -295,6 +295,18 @@ function inferNetworkFromRpcUrl(rpcUrl: string): Prepared["network"] {
   return "unknown";
 }
 
+function normalizePolicyAction(action: string): string {
+  const a = String(action || "").toLowerCase();
+  if (a.includes("swap")) return "swap";
+  if (a.includes("transfer")) return "transfer";
+  if (a.includes("balance")) return "balance";
+  if (a.includes("quote")) return "quote";
+  if (a.includes("simulate")) return "simulate";
+  if (a.includes("confirm")) return "confirm";
+  if (a.includes("metrics")) return "metrics.get";
+  return String(action || "");
+}
+
 // (moved to SolanaDriver)
 
 async function readJsonBody(req: http.IncomingMessage): Promise<any> {
@@ -667,7 +679,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           ? policy.decide({
               chain: "solana",
               network,
-              action: String(item.action),
+              action: normalizePolicyAction(String(item.action)),
               sideEffect: "broadcast",
               simulationOk: item.simulation?.ok === true,
               programIds: item.programIds ?? [],
@@ -988,7 +1000,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             ? policy.decide({
                 chain: "solana",
                 network,
-                action,
+                action: normalizePolicyAction(action),
                 sideEffect: "none",
                 simulationOk: simulation.ok,
                 programIdsKnown: known,
@@ -1113,7 +1125,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           ? policy.decide({
               chain: "solana",
               network,
-              action: String((built as any)?.meta?.action ?? action),
+              action: normalizePolicyAction(String((built as any)?.meta?.action ?? action)),
               sideEffect: "none",
               simulationOk: simulation.ok,
               programIds,
@@ -1278,7 +1290,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           ? policy.decide({
               chain: "solana",
               network,
-              action: String(item.action),
+              action: normalizePolicyAction(String(item.action)),
               sideEffect: "broadcast",
               simulationOk: item.simulation?.ok === true,
               programIds: item.programIds ?? [],
