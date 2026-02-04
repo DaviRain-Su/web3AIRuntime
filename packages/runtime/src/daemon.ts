@@ -787,10 +787,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       }
 
       // Meteora DLMM monitor (indexer-backed)
-      // GET /v1/meteora/monitor/top?base=SOL|USDC&window=5m|15m|60m&limit=20
+      // GET /v1/meteora/monitor/top?base=SOL|USDC&window=5m|15m|60m&limit=20&rank=fees|efficiency&minLiquidity=10000
       if (req.method === "GET" && url.pathname === "/v1/meteora/monitor/top") {
         const base = String(url.searchParams.get("base") ?? "USDC").toUpperCase();
         const windowStr = String(url.searchParams.get("window") ?? "15m");
+        const rank = String(url.searchParams.get("rank") ?? "fees"); // fees|efficiency
+        const minLiquidity = Math.max(0, Number(url.searchParams.get("minLiquidity") ?? 0));
         const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 20)));
 
         const WSOL_MINT = "So11111111111111111111111111111111111111112";
@@ -811,16 +813,18 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           ts: 0,
           pairs: [] as any[],
           hist: new Map<string, Array<{ ts: number; cumFee: number; cumVol: number; liquidity: number }>>(),
+          refresherStarted: false,
         };
         const st = (globalThis as any).__meteora as {
           ts: number;
           pairs: any[];
           hist: Map<string, Array<{ ts: number; cumFee: number; cumVol: number; liquidity: number }>>;
+          refresherStarted: boolean;
         };
 
-        async function refreshPairs() {
+        async function refreshPairs(force = false) {
           const now = Date.now();
-          if (st.pairs.length && now - st.ts < 60_000) return;
+          if (!force && st.pairs.length && now - st.ts < 60_000) return;
           const u = "https://dlmm-api.meteora.ag/pair/all";
           const res = await fetch(u);
           const text = await res.text();
@@ -829,7 +833,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           st.pairs = Array.isArray(pairs) ? pairs : [];
           st.ts = now;
 
-          // append history snapshot for each pair (for 5m/15m windows)
+          // append history snapshot for each pair (for 5m/15m/60m windows)
           for (const p of st.pairs) {
             const addr = String(p?.address ?? "");
             if (!addr) continue;
@@ -847,6 +851,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             while (arr.length && arr[0].ts < cutoff) arr.shift();
             st.hist.set(addr, arr);
           }
+        }
+
+        // background refresher (runs even without incoming requests)
+        if (!st.refresherStarted) {
+          st.refresherStarted = true;
+          setInterval(() => {
+            refreshPairs(false).catch(() => void 0);
+          }, 60_000).unref();
         }
 
         function deltaFor(addr: string, now: number) {
@@ -885,8 +897,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               const volDelta = d?.volDelta ?? 0;
               const liquidity = Number(d?.liquidity ?? p?.liquidity ?? 0);
 
-              // Default ranking: absolute feeDelta ("A" mode)
-              const score = feeDelta;
+              // rank=fees (default): absolute feeDelta
+              // rank=efficiency: feeDelta / liquidity
+              const score = rank === "efficiency" ? (liquidity > 0 ? feeDelta / liquidity : 0) : feeDelta;
 
               const otherMint = String(p.mint_x) === baseMint ? String(p.mint_y) : String(p.mint_x);
               return {
@@ -907,10 +920,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
                 source: "https://dlmm-api.meteora.ag/pair/all",
               };
             })
+            .filter((p: any) => (minLiquidity > 0 ? Number(p.liquidity ?? 0) >= minLiquidity : true))
             .sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
             .slice(0, limit);
 
-          return sendJson(res, 200, { ok: true, base, window: windowStr, limit, count: pools.length, pools });
+          return sendJson(res, 200, { ok: true, base, window: windowStr, rank, minLiquidity, limit, count: pools.length, pools });
         } catch (e: any) {
           return sendJson(res, 500, { ok: false, error: "METEORA_MONITOR_FAILED", message: String(e?.message ?? e) });
         }
