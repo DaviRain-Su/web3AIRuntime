@@ -884,7 +884,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               const feeDelta = d?.feeDelta ?? 0;
               const volDelta = d?.volDelta ?? 0;
               const liquidity = Number(d?.liquidity ?? p?.liquidity ?? 0);
-              const score = liquidity > 0 ? feeDelta / liquidity : feeDelta;
+
+              // Default ranking: absolute feeDelta ("A" mode)
+              const score = feeDelta;
 
               const otherMint = String(p.mint_x) === baseMint ? String(p.mint_y) : String(p.mint_x);
               return {
