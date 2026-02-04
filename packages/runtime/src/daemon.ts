@@ -405,12 +405,35 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
   mkdirSync(w3rtDir, { recursive: true });
 
   // policy config (optional)
+  let policySpec: PolicySpec | null = null;
   let policy: PolicyEngine | undefined;
-  try {
-    const policyCfg = loadYamlFile<PolicyConfig>(join(process.cwd(), ".w3rt", "policy.yaml"));
-    policy = new PolicyEngine(policyCfg);
-  } catch {
-    policy = undefined;
+
+  const policyPath = join(w3rtDir, "policy.yaml");
+
+  function reloadPolicyFromDisk(): { ok: boolean; error?: string } {
+    try {
+      const raw = loadYamlFile<any>(policyPath);
+      // Accept either PolicySpec (preferred) or legacy PolicyConfig
+      if (raw && typeof raw === "object" && raw.policySpecVersion === 1) {
+        policySpec = raw as PolicySpec;
+        const cfg = policyConfigFromSpec(policySpec);
+        policy = new PolicyEngine(cfg);
+      } else {
+        policySpec = null;
+        const cfg = raw as PolicyConfig;
+        policy = new PolicyEngine(cfg);
+      }
+      return { ok: true };
+    } catch (e: any) {
+      policySpec = null;
+      policy = undefined;
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+
+  // best-effort load at boot
+  if (existsSync(policyPath)) {
+    reloadPolicyFromDisk();
   }
 
   const prepared = new Map<string, Prepared>();
@@ -621,6 +644,61 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         }
 
         return sendJson(res, 200, { ok: true, warnings, spec, summary, config });
+      }
+
+      // policy: get current
+      // GET /v1/policy/current
+      if (req.method === "GET" && url.pathname === "/v1/policy/current") {
+        return sendJson(res, 200, {
+          ok: true,
+          path: policyPath,
+          loaded: !!policy,
+          spec: policySpec ?? null,
+        });
+      }
+
+      // policy: apply (write to disk + load into engine)
+      // POST /v1/policy/apply
+      // Body: { spec?: PolicySpec, config?: PolicyConfig }
+      if (req.method === "POST" && url.pathname === "/v1/policy/apply") {
+        const body = await readJsonBody(req);
+        const spec = body?.spec as PolicySpec | undefined;
+        const cfg = body?.config as PolicyConfig | undefined;
+
+        if (!spec && !cfg) return sendJson(res, 400, { ok: false, error: "MISSING_SPEC_OR_CONFIG" });
+
+        mkdirSync(dirname(policyPath), { recursive: true });
+
+        try {
+          if (spec) {
+            // Validate conversion
+            policyConfigFromSpec(spec);
+            writeFileSync(policyPath, yaml.dump(spec));
+          } else {
+            writeFileSync(policyPath, yaml.dump(cfg));
+          }
+        } catch (e: any) {
+          return sendJson(res, 200, { ok: false, error: "WRITE_FAILED", message: String(e?.message ?? e) });
+        }
+
+        const rr = reloadPolicyFromDisk();
+        if (!rr.ok) return sendJson(res, 200, { ok: false, error: "RELOAD_FAILED", message: rr.error });
+
+        return sendJson(res, 200, { ok: true, path: policyPath, loaded: true, spec: policySpec ?? null });
+      }
+
+      // policy: reset to default
+      // POST /v1/policy/reset
+      if (req.method === "POST" && url.pathname === "/v1/policy/reset") {
+        mkdirSync(dirname(policyPath), { recursive: true });
+        try {
+          writeFileSync(policyPath, yaml.dump(defaultPolicySpec()));
+        } catch (e: any) {
+          return sendJson(res, 200, { ok: false, error: "WRITE_FAILED", message: String(e?.message ?? e) });
+        }
+        const rr = reloadPolicyFromDisk();
+        if (!rr.ok) return sendJson(res, 200, { ok: false, error: "RELOAD_FAILED", message: rr.error });
+        return sendJson(res, 200, { ok: true, path: policyPath, loaded: true, spec: policySpec ?? null });
       }
 
       // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
