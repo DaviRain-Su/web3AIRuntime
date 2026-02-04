@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://web3airuntime.local/schema/policySpec.v1.json",
+  "title": "PolicySpecV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["policySpecVersion", "networks", "transactions", "allowlist"],
+  "properties": {
+    "policySpecVersion": { "type": "integer", "const": 1 },
+    "networks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mainnet", "testnet"],
+      "properties": {
+        "mainnet": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "requireApproval", "requireSimulation", "maxDailyVolumeUsd"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "requireApproval": { "type": "boolean" },
+            "requireSimulation": { "type": "boolean" },
+            "maxDailyVolumeUsd": { "type": "number", "minimum": 0 }
+          }
+        },
+        "testnet": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "requireApproval"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "requireApproval": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "transactions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxSingleAmountUsd", "maxSlippageBps", "requireConfirmation"],
+      "properties": {
+        "maxSingleAmountUsd": { "type": "number", "minimum": 0 },
+        "maxSlippageBps": { "type": "number", "minimum": 0, "maximum": 10000 },
+        "requireConfirmation": { "type": "string", "enum": ["never", "large", "always"] },
+
+        "cooldownSeconds": { "type": "number", "minimum": 0 },
+        "maxTxPerMinute": { "type": "number", "minimum": 0 },
+        "maxSingleSol": { "type": "number", "minimum": 0 },
+        "requireSimulatedSlippageOnMainnet": { "type": "boolean" }
+      }
+    },
+    "allowlist": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "solanaPrograms": { "type": "array", "items": { "type": "string" } },
+        "suiPackages": { "type": "array", "items": { "type": "string" } },
+        "evmContracts": { "type": "array", "items": { "type": "string" } },
+        "tokenMints": { "type": "array", "items": { "type": "string" } },
+        "actions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}
