@@ -1082,17 +1082,43 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         }
       }
 
+      function is429Error(e: any): boolean {
+        const msg = String(e?.message ?? e);
+        return msg.includes("429") || msg.toLowerCase().includes("too many requests");
+      }
+
+      async function withRetry<T>(fn: () => Promise<T>, opts: { retries?: number; baseDelayMs?: number } = {}): Promise<T> {
+        const retries = opts.retries ?? 3;
+        const baseDelayMs = opts.baseDelayMs ?? 500;
+        let lastErr: any;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+          try {
+            return await fn();
+          } catch (e: any) {
+            lastErr = e;
+            if (attempt >= retries || !is429Error(e)) throw e;
+            const wait = baseDelayMs * Math.pow(2, attempt);
+            await new Promise((r) => setTimeout(r, wait));
+          }
+        }
+        throw lastErr;
+      }
+
       async function resolveSwapExactInMeteora(params: any, ctx: { userPublicKey: string; rpcUrl: string }): Promise<{ ok: boolean; quote?: any; error?: string; message?: string }> {
         try {
-          const out = await defaultRegistry.get("meteora").buildTx(
-            "meteora.dlmm.swap_exact_in",
-            {
-              inputMint: String(params.inputMint),
-              outputMint: String(params.outputMint),
-              amount: String(params.amount),
-              slippageBps: Number(params.slippageBps),
-            },
-            ctx
+          const out = await withRetry(
+            () =>
+              defaultRegistry.get("meteora").buildTx(
+                "meteora.dlmm.swap_exact_in",
+                {
+                  inputMint: String(params.inputMint),
+                  outputMint: String(params.outputMint),
+                  amount: String(params.amount),
+                  slippageBps: Number(params.slippageBps),
+                },
+                ctx
+              ),
+            { retries: 4, baseDelayMs: 500 }
           );
 
           const inAmount = out?.meta?.amounts?.inAmount;
@@ -1106,6 +1132,43 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               outputMint: out.meta?.mints?.outputMint,
               inAmount,
               outAmount,
+            },
+          };
+        } catch (e: any) {
+          return { ok: false, error: "QUOTE_FAILED", message: String(e?.message ?? e) };
+        }
+      }
+
+      async function resolveSwapExactInRaydium(params: any, ctx: { userPublicKey: string; rpcUrl: string }): Promise<{ ok: boolean; quote?: any; error?: string; message?: string }> {
+        try {
+          const out = await withRetry(
+            () =>
+              defaultRegistry.get("raydium").buildTx(
+                "raydium.clmm.swap_exact_in",
+                {
+                  inputMint: String(params.inputMint),
+                  outputMint: String(params.outputMint),
+                  amount: String(params.amount),
+                  slippageBps: Number(params.slippageBps),
+                },
+                ctx
+              ),
+            { retries: 4, baseDelayMs: 700 }
+          );
+
+          const inAmount = out?.meta?.amounts?.inAmount;
+          const minOutAmount = (out as any)?.meta?.amounts?.minOutAmount;
+          if (!minOutAmount) throw new Error("Raydium quote missing minOutAmount");
+
+          return {
+            ok: true,
+            quote: {
+              inputMint: out.meta?.mints?.inputMint,
+              outputMint: out.meta?.mints?.outputMint,
+              inAmount,
+              // Note: conservative (min) amount
+              outAmount: String(minOutAmount),
+              kind: "minOut",
             },
           };
         } catch (e: any) {
@@ -1140,17 +1203,19 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             continue;
           }
 
-          // Phase 1: try Jupiter; if unavailable (e.g. missing/invalid API key), fall back to Meteora.
+          // Phase 2: try Jupiter, then compare Meteora vs Raydium (best-effort outAmount).
           const kp = loadSolanaKeypair();
           if (!kp) {
             outQuotes.push({ id, ok: false, error: "MISSING_SOLANA_KEYPAIR" });
             continue;
           }
           const rpcUrl = resolveSolanaRpc();
+          const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
           const qJ = await resolveSwapExactInJupiter(params);
           outQuotes.push({ id, adapter: "jupiter", ok: qJ.ok, quote: qJ.quote, error: qJ.error, message: qJ.message });
 
+          // If Jupiter works, use it (it is already an aggregate router).
           if (qJ.ok) {
             resolvedActions.push({
               id,
@@ -1164,19 +1229,36 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             continue;
           }
 
-          const qM = await resolveSwapExactInMeteora(params, { userPublicKey: kp.publicKey.toBase58(), rpcUrl });
+          const qM = await resolveSwapExactInMeteora(params, ctx);
           outQuotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
-          if (qM.ok) {
-            resolvedActions.push({
-              id,
-              dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
-              chain: "solana",
-              adapter: "meteora",
-              action: "meteora.dlmm.swap_exact_in",
-              params,
-              resolvedFrom: { type, chosen: "meteora" },
-            });
-          }
+
+          const qR = await resolveSwapExactInRaydium(params, ctx);
+          outQuotes.push({ id, adapter: "raydium", ok: qR.ok, quote: qR.quote, error: qR.error, message: qR.message });
+
+          const candidates = [
+            qM.ok ? { adapter: "meteora", action: "meteora.dlmm.swap_exact_in", q: qM.quote } : null,
+            qR.ok ? { adapter: "raydium", action: "raydium.clmm.swap_exact_in", q: qR.quote } : null,
+          ].filter(Boolean) as any[];
+
+          if (!candidates.length) continue;
+
+          // Choose max outAmount (string base units). Raydium uses conservative minOut.
+          candidates.sort((a, b) => {
+            const ao = BigInt(String(a.q?.outAmount ?? "0"));
+            const bo = BigInt(String(b.q?.outAmount ?? "0"));
+            return bo > ao ? 1 : bo < ao ? -1 : 0;
+          });
+
+          const chosen = candidates[0];
+          resolvedActions.push({
+            id,
+            dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
+            chain: "solana",
+            adapter: chosen.adapter,
+            action: chosen.action,
+            params,
+            resolvedFrom: { type, chosen: chosen.adapter, scoring: "maxOutAmount" },
+          });
         }
 
         return sendJson(res, 200, {
@@ -1219,6 +1301,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               continue;
             }
             const rpcUrl = resolveSolanaRpc();
+            const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
             const qJ = await resolveSwapExactInJupiter(params);
             quotes.push({ id, adapter: "jupiter", ok: qJ.ok, quote: qJ.quote, error: qJ.error, message: qJ.message });
@@ -1236,18 +1319,34 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               continue;
             }
 
-            const qM = await resolveSwapExactInMeteora(params, { userPublicKey: kp.publicKey.toBase58(), rpcUrl });
+            const qM = await resolveSwapExactInMeteora(params, ctx);
             quotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
-            if (!qM.ok) continue;
 
+            const qR = await resolveSwapExactInRaydium(params, ctx);
+            quotes.push({ id, adapter: "raydium", ok: qR.ok, quote: qR.quote, error: qR.error, message: qR.message });
+
+            const candidates = [
+              qM.ok ? { adapter: "meteora", action: "meteora.dlmm.swap_exact_in", q: qM.quote } : null,
+              qR.ok ? { adapter: "raydium", action: "raydium.clmm.swap_exact_in", q: qR.quote } : null,
+            ].filter(Boolean) as any[];
+
+            if (!candidates.length) continue;
+
+            candidates.sort((a, b) => {
+              const ao = BigInt(String(a.q?.outAmount ?? "0"));
+              const bo = BigInt(String(b.q?.outAmount ?? "0"));
+              return bo > ao ? 1 : bo < ao ? -1 : 0;
+            });
+
+            const chosen = candidates[0];
             resolved.push({
               id,
               dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
               chain: "solana",
-              adapter: "meteora",
-              action: "meteora.dlmm.swap_exact_in",
+              adapter: chosen.adapter,
+              action: chosen.action,
               params,
-              resolvedFrom: { type, chosen: "meteora" },
+              resolvedFrom: { type, chosen: chosen.adapter, scoring: "maxOutAmount" },
             });
           }
 
