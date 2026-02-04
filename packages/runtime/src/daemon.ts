@@ -1687,7 +1687,25 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               rpcUrl,
             });
           } catch (e: any) {
-            const r = { ok: false, id, error: "UNKNOWN_ADAPTER", adapter, action, message: String(e?.message ?? e) };
+            const r = {
+              ok: false,
+              id,
+              error: "BUILD_FAILED",
+              adapter,
+              action,
+              message: String(e?.message ?? e),
+              summary: {
+                kind: String(action).includes("swap") ? "swap" : String(action).includes("transfer") ? "transfer" : "unknown",
+                chain,
+                stepId: id,
+                adapter,
+                action,
+                inputMint: params?.inputMint ?? null,
+                outputMint: params?.outputMint ?? null,
+                inAmount: params?.amount ?? null,
+                slippageBps: params?.slippageBps ?? null,
+              },
+            };
             results.push(r);
             resultById.set(id, r);
             continue;
@@ -1755,6 +1773,37 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             artifactCanonicalJson: hash.canonicalJson,
           });
 
+          // Human-friendly confirmation summary (best-effort)
+          const meta: any = built.meta ?? {};
+          const mints = meta?.mints ?? {};
+          const amounts = meta?.amounts ?? {};
+
+          // If this run originated from intents, attach resolver context.
+          const resolverQuote = resolveInfo?.quotes
+            ? (resolveInfo.quotes as any[]).find((q) => q && q.id === id && q.adapter === String(meta?.adapter ?? adapter))
+            : null;
+          const resolverChosen = resolveInfo?.chosen
+            ? (resolveInfo.chosen as any[]).find((c) => c && c.id === id)
+            : null;
+
+          const summary = {
+            kind: String(action).includes("swap") ? "swap" : String(action).includes("transfer") ? "transfer" : "unknown",
+            chain,
+            stepId: id,
+            adapter: String(meta?.adapter ?? adapter),
+            action: String(meta?.action ?? action),
+            inputMint: mints.inputMint ?? null,
+            outputMint: mints.outputMint ?? null,
+            inAmount: amounts.inAmount ?? params.amount ?? null,
+            expectedOut: amounts.outAmount ?? amounts.outAmountBase ?? null,
+            minOut: amounts.minOutAmount ?? null,
+            slippageBps: meta.slippageBps ?? params.slippageBps ?? null,
+            confidence: resolverQuote?.confidence ?? null,
+            explain: resolverQuote?.explain ?? null,
+            scoring: resolverChosen?.scoring ?? null,
+            scoringBreakdown: resolverChosen?.scoringBreakdown ?? null,
+          };
+
           const out = {
             ok: true,
             id,
@@ -1768,7 +1817,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             simulation,
             programIds,
             programIdsKnown: known,
-            meta: built.meta ?? {},
+            meta,
+            summary,
             policyReport: decision,
             artifactSchemaVersion: hash.schemaVersion,
             hashAlg: hash.hashAlg,
@@ -1784,11 +1834,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         try {
           writeFileSync(join(runDir, "simulate.json"), JSON.stringify({ ok: true, runId, results: results.map((r) => ({ id: r.id, simulation: r.simulation })) }, null, 2));
           writeFileSync(join(runDir, "policy.json"), JSON.stringify({ ok: true, runId, results: results.map((r) => ({ id: r.id, policyReport: r.policyReport, allowed: r.allowed, requiresApproval: r.requiresApproval })) }, null, 2));
+          writeFileSync(join(runDir, "summary.json"), JSON.stringify({ ok: true, runId, summaries: results.filter((r) => r && r.ok).map((r) => r.summary) }, null, 2));
         } catch {
           // best-effort
         }
 
-        return sendJson(res, 200, { ok: true, runId, traceId: runId, order: ordered.map((a) => a.id), results, artifactsDir: runDir });
+        const summaries = results.filter((r) => r && r.ok).map((r) => r.summary);
+
+        return sendJson(res, 200, { ok: true, runId, traceId: runId, order: ordered.map((a) => a.id), results, summaries, artifactsDir: runDir });
       }
 
       // Workflow v0: explicit confirm/execute wrapper.
@@ -1933,7 +1986,25 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               rpcUrl,
             });
           } catch (e: any) {
-            const r = { ok: false, id, error: "UNKNOWN_ADAPTER", adapter, action, message: String(e?.message ?? e) };
+            const r = {
+              ok: false,
+              id,
+              error: "BUILD_FAILED",
+              adapter,
+              action,
+              message: String(e?.message ?? e),
+              summary: {
+                kind: String(action).includes("swap") ? "swap" : String(action).includes("transfer") ? "transfer" : "unknown",
+                chain,
+                stepId: id,
+                adapter,
+                action,
+                inputMint: params?.inputMint ?? null,
+                outputMint: params?.outputMint ?? null,
+                inAmount: params?.amount ?? null,
+                slippageBps: params?.slippageBps ?? null,
+              },
+            };
             results.push(r);
             resultById.set(id, r);
             continue;
