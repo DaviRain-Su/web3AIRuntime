@@ -377,6 +377,29 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
   const prepared = new Map<string, Prepared>();
 
+  function loadRunStatus(runId: string): any | null {
+    try {
+      const p = join(w3rtDir, "runs", runId, "status.json");
+      const raw = readFileSync(p, "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeRunStatus(runId: string, patch: any) {
+    const runDir = join(w3rtDir, "runs", runId);
+    mkdirSync(runDir, { recursive: true });
+    const prev = loadRunStatus(runId) ?? { runId, status: "unknown", steps: {} };
+    const next = {
+      ...prev,
+      ...patch,
+      steps: { ...(prev.steps ?? {}), ...(patch.steps ?? {}) },
+      updatedAt: new Date().toISOString(),
+    };
+    writeFileSync(join(runDir, "status.json"), JSON.stringify(next, null, 2));
+  }
+
   // executed (idempotency): preparedId -> { signature, ts }
   const executedPath = join(w3rtDir, "executed.json");
   const executed = new Map<string, { signature: string; ts: number }>();
@@ -1610,6 +1633,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const trace = new TraceStore(w3rtDir);
         trace.emit({ ts: Date.now(), type: "run.started", runId, data: { mode: "workflow.v0", network, count: ordered.length } });
 
+        // Initialize run status
+        writeRunStatus(runId, { status: "preparing", network, steps: {} });
+
         const runDir = join(w3rtDir, "runs", runId);
         mkdirSync(runDir, { recursive: true });
 
@@ -1825,6 +1851,25 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             artifactHash: hash.artifactHash,
           };
 
+          // Persist step status
+          writeRunStatus(runId, {
+            status: requiresApproval ? "needs_confirm" : "prepared",
+            steps: {
+              [id]: {
+                id,
+                adapter: String(meta?.adapter ?? adapter),
+                action: String(meta?.action ?? action),
+                preparedId,
+                allowed,
+                requiresApproval,
+                simulationOk: simulation.ok === true,
+                artifactHash: hash.artifactHash,
+                summary,
+                state: "prepared",
+              },
+            },
+          });
+
           results.push(out);
           resultById.set(id, out);
         }
@@ -1846,12 +1891,23 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
       // Workflow v0: explicit confirm/execute wrapper.
       // POST /v1/workflows/confirm_v0
-      // Body: { preparedId, confirm:true }
+      // Body: { preparedId, confirm:true } OR { runId, stepId, confirm:true }
       if (req.method === "POST" && url.pathname === "/v1/workflows/confirm_v0") {
         const body = await readJsonBody(req);
-        const preparedId = String(body.preparedId || "");
+
+        // Allow confirming by (runId, stepId) in addition to preparedId.
+        let preparedId = String(body.preparedId || "");
+        const runId = body.runId ? String(body.runId) : "";
+        const stepId = body.stepId ? String(body.stepId) : "";
+
+        if (!preparedId && runId && stepId) {
+          const status = loadRunStatus(runId);
+          const pid = status?.steps?.[stepId]?.preparedId;
+          if (pid) preparedId = String(pid);
+        }
+
         const confirm = body.confirm === true;
-        if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID" });
+        if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID", hint: "Provide preparedId or (runId + stepId)" });
         if (!confirm) return sendJson(res, 400, { ok: false, error: "CONFIRM_REQUIRED" });
 
         // Delegate to the existing execute path by reusing its semantics.
@@ -1921,7 +1977,26 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           // best-effort
         }
 
-        return sendJson(res, 200, { ok: true, signature: sig, traceId });
+        // Update status.json if present
+        try {
+          const st = loadRunStatus(traceId);
+          if (st && typeof st === "object") {
+            const steps = st.steps ?? {};
+            for (const [sid, s] of Object.entries(steps)) {
+              if ((s as any)?.preparedId === preparedId) {
+                writeRunStatus(traceId, {
+                  status: "executed",
+                  steps: { [sid]: { ...(s as any), state: "executed", signature: sig } },
+                });
+                break;
+              }
+            }
+          }
+        } catch {
+          // best-effort
+        }
+
+        return sendJson(res, 200, { ok: true, signature: sig, traceId, runId: traceId });
       }
 
       // Compile a plan (list/DAG of action intents) into chain-specific prepared artifacts.
