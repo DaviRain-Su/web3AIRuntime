@@ -1229,10 +1229,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             continue;
           }
 
-          const qM = await resolveSwapExactInMeteora(params, ctx);
-          outQuotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
+          const [qM, qR] = await Promise.all([
+            resolveSwapExactInMeteora(params, ctx),
+            resolveSwapExactInRaydium(params, ctx),
+          ]);
 
-          const qR = await resolveSwapExactInRaydium(params, ctx);
+          outQuotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
           outQuotes.push({ id, adapter: "raydium", ok: qR.ok, quote: qR.quote, error: qR.error, message: qR.message });
 
           const candidates = [
@@ -1319,10 +1321,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               continue;
             }
 
-            const qM = await resolveSwapExactInMeteora(params, ctx);
-            quotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
+            const [qM, qR] = await Promise.all([
+              resolveSwapExactInMeteora(params, ctx),
+              resolveSwapExactInRaydium(params, ctx),
+            ]);
 
-            const qR = await resolveSwapExactInRaydium(params, ctx);
+            quotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
             quotes.push({ id, adapter: "raydium", ok: qR.ok, quote: qR.quote, error: qR.error, message: qR.message });
 
             const candidates = [
