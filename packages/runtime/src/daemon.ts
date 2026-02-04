@@ -387,6 +387,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
     }
   }
 
+  function loadRunPlan(runId: string): any | null {
+    try {
+      const p = join(w3rtDir, "runs", runId, "plan.json");
+      const raw = readFileSync(p, "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
   function writeRunStatus(runId: string, patch: any) {
     const runDir = join(w3rtDir, "runs", runId);
     mkdirSync(runDir, { recursive: true });
@@ -1916,6 +1926,16 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const runId = body.runId ? String(body.runId) : "";
         const stepId = body.stepId ? String(body.stepId) : "";
 
+        // If already executed for this run+step, return idempotently.
+        if (runId && stepId) {
+          const status = loadRunStatus(runId);
+          const step = status?.steps?.[stepId];
+          const sig = step?.signature;
+          if (typeof sig === "string" && sig.length > 20) {
+            return sendJson(res, 200, { ok: true, signature: sig, traceId: runId, runId, idempotent: true });
+          }
+        }
+
         if (!preparedId && runId && stepId) {
           const status = loadRunStatus(runId);
           const pid = status?.steps?.[stepId]?.preparedId;
@@ -2480,6 +2500,140 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         prepared.delete(preparedId);
 
         return sendJson(res, 200, { ok: true, signature: sig, traceId });
+      }
+
+      // Workflow v0: retry a step by re-compiling it into a new preparedId (refresh blockhash, etc.)
+      // POST /v1/workflows/retry_v0
+      // Body: { runId, stepId }
+      if (req.method === "POST" && url.pathname === "/v1/workflows/retry_v0") {
+        const body = await readJsonBody(req);
+        const runId = String(body.runId || "");
+        const stepId = String(body.stepId || "");
+        if (!runId) return sendJson(res, 400, { ok: false, error: "MISSING_RUN_ID" });
+        if (!stepId) return sendJson(res, 400, { ok: false, error: "MISSING_STEP_ID" });
+
+        const plan = loadRunPlan(runId);
+        const actions = normalizeActions(plan?.actions ?? plan?.plan?.actions ?? plan?.actions);
+        const step = actions.find((a) => String(a.id) === stepId);
+        if (!step) return sendJson(res, 404, { ok: false, error: "STEP_NOT_FOUND" });
+
+        const kp = loadSolanaKeypair();
+        if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+        const drivers = makeDriverRegistry(rpcUrl);
+        const driver = drivers[String(step.chain || "solana")];
+        if (!driver) return sendJson(res, 400, { ok: false, error: "UNSUPPORTED_CHAIN" });
+
+        const adapter = String(step.adapter || "");
+        const action = String(step.action || "");
+        const params = (step.params ?? {}) as Dict;
+
+        let built: any;
+        try {
+          built = await defaultRegistry.get(adapter).buildTx(action, params, {
+            userPublicKey: kp.publicKey.toBase58(),
+            rpcUrl,
+          });
+        } catch (e: any) {
+          return sendJson(res, 500, { ok: false, error: "BUILD_FAILED", message: String(e?.message ?? e), runId, stepId, adapter, action });
+        }
+
+        const txB64 = built.txB64;
+        const extraSigners = (built as any).signers as Uint8Array[] | undefined;
+        const simulation = await driver.simulateTxB64(txB64, { rpcUrl });
+        const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
+
+        const decision = policy
+          ? policy.decide({
+              chain: "solana",
+              network,
+              action: normalizePolicyAction(String((built as any)?.meta?.action ?? action)),
+              sideEffect: "none",
+              simulationOk: simulation.ok,
+              programIdsKnown: known,
+              programIds,
+            } as any)
+          : { decision: "allow" };
+
+        const requiresApproval = true;
+        const allowed = decision.decision === "allow" || decision.decision === "confirm";
+
+        const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
+        const now = Date.now();
+        const hash = computeArtifactHash({ chain: "solana", adapter, action, params, txB64, simulation, programIds, preparedId, traceId: runId });
+        const parsed = safeParseTx(txB64);
+
+        prepared.set(preparedId, {
+          preparedId,
+          createdAt: now,
+          expiresAt: now + ttlMs,
+          traceId: runId,
+          chain: "solana",
+          adapter,
+          action,
+          params,
+          txB64,
+          recentBlockhash: parsed?.recentBlockhash,
+          extraSigners,
+          simulation,
+          programIds,
+          programIdsKnown: known,
+          network,
+          artifactSchemaVersion: hash.schemaVersion,
+          hashAlg: hash.hashAlg,
+          artifactHash: hash.artifactHash,
+          artifactCanonicalJson: hash.canonicalJson,
+        });
+
+        const meta: any = built.meta ?? {};
+        const mints = meta?.mints ?? {};
+        const amounts = meta?.amounts ?? {};
+        const summary = {
+          kind: String(action).includes("swap") ? "swap" : String(action).includes("transfer") ? "transfer" : "unknown",
+          chain: "solana",
+          stepId,
+          adapter: String(meta?.adapter ?? adapter),
+          action: String(meta?.action ?? action),
+          inputMint: mints.inputMint ?? params.inputMint ?? null,
+          outputMint: mints.outputMint ?? params.outputMint ?? null,
+          inAmount: amounts.inAmount ?? params.amount ?? null,
+          expectedOut: amounts.outAmount ?? null,
+          minOut: amounts.minOutAmount ?? null,
+          slippageBps: meta.slippageBps ?? params.slippageBps ?? null,
+        };
+
+        writeRunStatus(runId, {
+          status: "needs_confirm",
+          steps: {
+            [stepId]: {
+              ...(loadRunStatus(runId)?.steps?.[stepId] ?? {}),
+              id: stepId,
+              adapter: String(meta?.adapter ?? adapter),
+              action: String(meta?.action ?? action),
+              preparedId,
+              allowed,
+              requiresApproval,
+              simulationOk: simulation.ok === true,
+              artifactHash: hash.artifactHash,
+              summary,
+              state: "prepared",
+            },
+          },
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          runId,
+          stepId,
+          preparedId,
+          allowed,
+          requiresApproval,
+          simulation,
+          policyReport: decision,
+          summary,
+        });
       }
 
       if (req.method === "GET" && url.pathname.startsWith("/v1/traces/")) {
