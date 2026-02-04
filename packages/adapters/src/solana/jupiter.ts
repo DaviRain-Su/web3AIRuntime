@@ -80,32 +80,51 @@ export const jupiterAdapter: Adapter = {
     const amount = String(params.amount);
     const slippageBps = Number(params.slippageBps);
 
-    // 1) quote
-    const quoteUrl = new URL("/swap/v1/quote", base);
-    quoteUrl.searchParams.set("inputMint", inputMint);
-    quoteUrl.searchParams.set("outputMint", outputMint);
-    quoteUrl.searchParams.set("amount", amount);
-    quoteUrl.searchParams.set("slippageBps", String(slippageBps));
+    async function buildVia(baseUrl: string, key?: string) {
+      // 1) quote
+      const quoteUrl = new URL("/swap/v1/quote", baseUrl);
+      quoteUrl.searchParams.set("inputMint", inputMint);
+      quoteUrl.searchParams.set("outputMint", outputMint);
+      quoteUrl.searchParams.set("amount", amount);
+      quoteUrl.searchParams.set("slippageBps", String(slippageBps));
 
-    const quote = (await fetchJsonWithRetry(quoteUrl.toString(), {
-      headers: apiKey ? { "x-api-key": apiKey } : undefined,
-    })) as QuoteResponse;
+      const quote = (await fetchJsonWithRetry(quoteUrl.toString(), {
+        headers: key ? { "x-api-key": key } : undefined,
+      })) as QuoteResponse;
 
-    // 2) build tx
-    const swapBody = {
-      quoteResponse: quote,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-    };
+      // 2) build tx
+      const swapBody = {
+        quoteResponse: quote,
+        userPublicKey,
+        wrapAndUnwrapSol: true,
+      };
 
-    const swapOut = await fetchJsonWithRetry(new URL("/swap/v1/swap", base).toString(), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { "x-api-key": apiKey } : {}),
-      },
-      body: swapBody,
-    });
+      const swapOut = await fetchJsonWithRetry(new URL("/swap/v1/swap", baseUrl).toString(), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(key ? { "x-api-key": key } : {}),
+        },
+        body: swapBody,
+      });
+
+      return { quote, swapOut };
+    }
+
+    let quote: QuoteResponse;
+    let swapOut: any;
+
+    try {
+      ({ quote, swapOut } = await buildVia(base, apiKey));
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      // If the configured base URL is a paid endpoint requiring auth, fall back to public Jupiter.
+      if (msg.includes("HTTP 401") || msg.toLowerCase().includes("unauthorized")) {
+        ({ quote, swapOut } = await buildVia("https://api.jup.ag", undefined));
+      } else {
+        throw e;
+      }
+    }
 
     const txB64 = swapOut?.swapTransaction;
     if (!txB64) throw new Error("Jupiter swap build response missing swapTransaction");

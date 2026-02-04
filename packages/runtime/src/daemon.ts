@@ -997,12 +997,263 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return false;
       }
 
+      async function fetchJsonWithRetry(url: URL | string, opts: {
+        method?: string;
+        headers?: Record<string, string>;
+        body?: any;
+        timeoutMs?: number;
+        retries?: number;
+        retryDelayMs?: number;
+      }): Promise<any> {
+        const {
+          method = "GET",
+          headers,
+          body,
+          timeoutMs = 12_000,
+          retries = 2,
+          retryDelayMs = 400,
+        } = opts;
+
+        let lastErr: any;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+          try {
+            const res = await fetch(url, {
+              method,
+              headers,
+              body: body == null ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+              signal: ctrl.signal,
+            });
+            const text = await res.text();
+            if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+            return text ? JSON.parse(text) : null;
+          } catch (e: any) {
+            lastErr = e;
+            clearTimeout(timer);
+            if (attempt >= retries) throw e;
+            const wait = retryDelayMs * Math.pow(2, attempt);
+            await new Promise((r) => setTimeout(r, wait));
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        throw lastErr;
+      }
+
+      async function resolveSwapExactInJupiter(params: any): Promise<{ ok: boolean; quote?: any; error?: string; message?: string }> {
+        const base = process.env.W3RT_JUPITER_BASE_URL || "https://api.jup.ag";
+        const apiKey = process.env.W3RT_JUPITER_API_KEY;
+
+        const inputMint = String(params.inputMint);
+        const outputMint = String(params.outputMint);
+        const amount = String(params.amount);
+        const slippageBps = Number(params.slippageBps);
+
+        const quoteUrl = new URL("/swap/v1/quote", base);
+        quoteUrl.searchParams.set("inputMint", inputMint);
+        quoteUrl.searchParams.set("outputMint", outputMint);
+        quoteUrl.searchParams.set("amount", amount);
+        quoteUrl.searchParams.set("slippageBps", String(slippageBps));
+
+        try {
+          const quote = await fetchJsonWithRetry(quoteUrl.toString(), {
+            headers: apiKey ? { "x-api-key": apiKey } : undefined,
+          });
+          return { ok: true, quote };
+        } catch (e: any) {
+          // If an (optional) API key/base is misconfigured, fall back to public Jupiter.
+          const msg = String(e?.message ?? e);
+          if (msg.includes("HTTP 401") || msg.toLowerCase().includes("unauthorized")) {
+            try {
+              const publicBase = "https://api.jup.ag";
+              const u = new URL("/swap/v1/quote", publicBase);
+              u.searchParams.set("inputMint", inputMint);
+              u.searchParams.set("outputMint", outputMint);
+              u.searchParams.set("amount", amount);
+              u.searchParams.set("slippageBps", String(slippageBps));
+              const quote = await fetchJsonWithRetry(u.toString(), { headers: undefined });
+              return { ok: true, quote };
+            } catch (e2: any) {
+              return { ok: false, error: "QUOTE_FAILED", message: String(e2?.message ?? e2) };
+            }
+          }
+          return { ok: false, error: "QUOTE_FAILED", message: msg };
+        }
+      }
+
+      async function resolveSwapExactInMeteora(params: any, ctx: { userPublicKey: string; rpcUrl: string }): Promise<{ ok: boolean; quote?: any; error?: string; message?: string }> {
+        try {
+          const out = await defaultRegistry.get("meteora").buildTx(
+            "meteora.dlmm.swap_exact_in",
+            {
+              inputMint: String(params.inputMint),
+              outputMint: String(params.outputMint),
+              amount: String(params.amount),
+              slippageBps: Number(params.slippageBps),
+            },
+            ctx
+          );
+
+          const inAmount = out?.meta?.amounts?.inAmount;
+          const outAmount = out?.meta?.amounts?.outAmount;
+          if (!outAmount) throw new Error("Meteora quote missing outAmount");
+
+          return {
+            ok: true,
+            quote: {
+              inputMint: out.meta?.mints?.inputMint,
+              outputMint: out.meta?.mints?.outputMint,
+              inAmount,
+              outAmount,
+            },
+          };
+        } catch (e: any) {
+          return { ok: false, error: "QUOTE_FAILED", message: String(e?.message ?? e) };
+        }
+      }
+
+      // Workflow v0: resolve chain-agnostic intents into concrete adapter actions (phase 1: Jupiter only)
+      // POST /v1/workflows/resolve_v0
+      // Body: { intents: [...] }
+      if (req.method === "POST" && url.pathname === "/v1/workflows/resolve_v0") {
+        const body = await readJsonBody(req);
+        const intents = Array.isArray(body?.intents) ? body.intents : [];
+        if (!intents.length) return sendJson(res, 400, { ok: false, error: "MISSING_INTENTS" });
+
+        const outQuotes: any[] = [];
+        const resolvedActions: any[] = [];
+
+        for (const it of intents) {
+          const id = String(it?.id ?? `i_${crypto.randomUUID().slice(0, 8)}`);
+          const chain = String(it?.chain ?? "solana");
+          const type = String(it?.type ?? "");
+          const params = it?.params ?? {};
+
+          if (chain !== "solana") {
+            outQuotes.push({ id, ok: false, error: "UNSUPPORTED_CHAIN", chain });
+            continue;
+          }
+
+          if (type !== "swap_exact_in") {
+            outQuotes.push({ id, ok: false, error: "UNSUPPORTED_INTENT", type });
+            continue;
+          }
+
+          // Phase 1: try Jupiter; if unavailable (e.g. missing/invalid API key), fall back to Meteora.
+          const kp = loadSolanaKeypair();
+          if (!kp) {
+            outQuotes.push({ id, ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+            continue;
+          }
+          const rpcUrl = resolveSolanaRpc();
+
+          const qJ = await resolveSwapExactInJupiter(params);
+          outQuotes.push({ id, adapter: "jupiter", ok: qJ.ok, quote: qJ.quote, error: qJ.error, message: qJ.message });
+
+          if (qJ.ok) {
+            resolvedActions.push({
+              id,
+              dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
+              chain: "solana",
+              adapter: "jupiter",
+              action: "solana.swap_exact_in",
+              params,
+              resolvedFrom: { type, chosen: "jupiter" },
+            });
+            continue;
+          }
+
+          const qM = await resolveSwapExactInMeteora(params, { userPublicKey: kp.publicKey.toBase58(), rpcUrl });
+          outQuotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
+          if (qM.ok) {
+            resolvedActions.push({
+              id,
+              dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
+              chain: "solana",
+              adapter: "meteora",
+              action: "meteora.dlmm.swap_exact_in",
+              params,
+              resolvedFrom: { type, chosen: "meteora" },
+            });
+          }
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          intentsCount: intents.length,
+          quotes: outQuotes,
+          resolvedActions,
+          chosen: resolvedActions.map((a) => ({ id: a.id, adapter: a.adapter })),
+        });
+      }
+
       // Workflow v0: single entrypoint that compiles a deterministic plan into prepared artifacts.
       // POST /v1/workflows/run_v0
-      // Body: { plan: { actions: [...] } } (or { actions: [...] })
+      // Body: { plan: { actions: [...] } } (or { actions: [...] }) OR { intents: [...] }
       if (req.method === "POST" && url.pathname === "/v1/workflows/run_v0") {
         const body = await readJsonBody(req);
-        const actions = normalizeActions(body.actions ?? body.plan?.actions ?? body.plan?.steps);
+
+        // Accept chain-agnostic intents and resolve them first (phase 1: Jupiter only)
+        let actions = normalizeActions(body.actions ?? body.plan?.actions ?? body.plan?.steps);
+        let resolveInfo: any = null;
+        if ((!actions || !actions.length) && Array.isArray(body?.intents) && body.intents.length) {
+          const intents = body.intents;
+          const quotes: any[] = [];
+          const resolved: any[] = [];
+
+          for (const it of intents) {
+            const id = String(it?.id ?? `i_${crypto.randomUUID().slice(0, 8)}`);
+            const chain = String(it?.chain ?? "solana");
+            const type = String(it?.type ?? "");
+            const params = it?.params ?? {};
+
+            if (chain !== "solana" || type !== "swap_exact_in") {
+              quotes.push({ id, ok: false, error: chain !== "solana" ? "UNSUPPORTED_CHAIN" : "UNSUPPORTED_INTENT", chain, type });
+              continue;
+            }
+
+            const kp = loadSolanaKeypair();
+            if (!kp) {
+              quotes.push({ id, ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+              continue;
+            }
+            const rpcUrl = resolveSolanaRpc();
+
+            const qJ = await resolveSwapExactInJupiter(params);
+            quotes.push({ id, adapter: "jupiter", ok: qJ.ok, quote: qJ.quote, error: qJ.error, message: qJ.message });
+
+            if (qJ.ok) {
+              resolved.push({
+                id,
+                dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
+                chain: "solana",
+                adapter: "jupiter",
+                action: "solana.swap_exact_in",
+                params,
+                resolvedFrom: { type, chosen: "jupiter" },
+              });
+              continue;
+            }
+
+            const qM = await resolveSwapExactInMeteora(params, { userPublicKey: kp.publicKey.toBase58(), rpcUrl });
+            quotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
+            if (!qM.ok) continue;
+
+            resolved.push({
+              id,
+              dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
+              chain: "solana",
+              adapter: "meteora",
+              action: "meteora.dlmm.swap_exact_in",
+              params,
+              resolvedFrom: { type, chosen: "meteora" },
+            });
+          }
+
+          resolveInfo = { intentsCount: intents.length, quotes, resolvedActions: resolved, chosen: resolved.map((a) => ({ id: a.id, adapter: a.adapter })) };
+          actions = normalizeActions(resolved);
+        }
 
         if (!actions.length) return sendJson(res, 400, { ok: false, error: "MISSING_ACTIONS" });
 
@@ -1025,6 +1276,15 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const runDir = join(w3rtDir, "runs", runId);
         mkdirSync(runDir, { recursive: true });
+
+        // Persist resolve info (if run started from chain-agnostic intents)
+        if (resolveInfo) {
+          try {
+            writeFileSync(join(runDir, "resolve.json"), JSON.stringify({ ok: true, runId, network, ...resolveInfo }, null, 2));
+          } catch {
+            // best-effort
+          }
+        }
 
         // Persist input plan
         try {
