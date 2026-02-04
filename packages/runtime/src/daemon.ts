@@ -972,6 +972,309 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, { ok: true, plan, next: { compile: "/v1/plan/compile" } });
       }
 
+      const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+      const MAX_USDC_BASE_UNITS = 100 * 1_000_000;
+
+      function exceedsDefaultUsdcLimit(a: { action?: string; params?: any }): boolean {
+        const action = String(a?.action ?? "").toLowerCase();
+        const p = (a?.params ?? {}) as any;
+
+        // Only enforce a hard cap when we can confidently interpret the amount as USDC.
+        const isUsdcMint = (m: any) => String(m ?? "") === USDC_MINT;
+
+        // swap: if inputMint is USDC and amount is base units
+        if (action.includes("swap") && isUsdcMint(p.inputMint)) {
+          const amt = Number(p.amount);
+          if (Number.isFinite(amt) && amt > MAX_USDC_BASE_UNITS) return true;
+        }
+
+        // transfers / deposits using amountBase (base units)
+        if ((action.includes("transfer") || action.includes("deposit")) && (isUsdcMint(p.mint) || isUsdcMint(p.tokenMint) || isUsdcMint(p.stableMint))) {
+          const amt = Number(p.amountBase ?? p.amount);
+          if (Number.isFinite(amt) && amt > MAX_USDC_BASE_UNITS) return true;
+        }
+
+        return false;
+      }
+
+      // Workflow v0: single entrypoint that compiles a deterministic plan into prepared artifacts.
+      // POST /v1/workflows/run_v0
+      // Body: { plan: { actions: [...] } } (or { actions: [...] })
+      if (req.method === "POST" && url.pathname === "/v1/workflows/run_v0") {
+        const body = await readJsonBody(req);
+        const actions = normalizeActions(body.actions ?? body.plan?.actions ?? body.plan?.steps);
+
+        if (!actions.length) return sendJson(res, 400, { ok: false, error: "MISSING_ACTIONS" });
+
+        const { ordered, cycles } = topoOrderActions(actions);
+        if (cycles.length) return sendJson(res, 400, { ok: false, error: "PLAN_CYCLE", cycles });
+
+        const kp = loadSolanaKeypair();
+        if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+
+        // v0 safety baseline: mainnet + explicit confirm required for any broadcast (enforced in /v1/actions/execute).
+        // v0 risk baseline: single-step cap at 100 USDC when amount is clearly USDC.
+
+        const traceId = crypto.randomUUID();
+        const runId = traceId;
+        const trace = new TraceStore(w3rtDir);
+        trace.emit({ ts: Date.now(), type: "run.started", runId, data: { mode: "workflow.v0", network, count: ordered.length } });
+
+        const runDir = join(w3rtDir, "runs", runId);
+        mkdirSync(runDir, { recursive: true });
+
+        // Persist input plan
+        try {
+          writeFileSync(join(runDir, "plan.json"), JSON.stringify({ ok: true, runId, network, actions: ordered }, null, 2));
+        } catch {
+          // best-effort
+        }
+
+        const drivers = makeDriverRegistry(rpcUrl);
+        const results: any[] = [];
+        const resultById = new Map<string, any>();
+
+        for (const [idx, a] of ordered.entries()) {
+          const id = String(a.id);
+          const adapter = String(a.adapter || "");
+          const action = String(a.action || "");
+          const params = (a.params ?? {}) as Dict;
+          const chain = String(a.chain || "solana");
+          const deps = a.dependsOn ?? [];
+
+          const depFailed = deps.some((d) => {
+            const r = resultById.get(String(d));
+            return r && (r.ok === false || r.allowed === false);
+          });
+          if (depFailed) {
+            const r = { ok: false, id, error: "DEP_FAILED", dependsOn: deps };
+            results.push(r);
+            resultById.set(id, r);
+            continue;
+          }
+
+          // v0 hard cap (best-effort)
+          if (exceedsDefaultUsdcLimit({ action, params })) {
+            const r = {
+              ok: false,
+              id,
+              error: "RISK_LIMIT_EXCEEDED",
+              message: "Default risk limit exceeded (100 USDC per step)",
+              limit: { usdc: 100 },
+              adapter,
+              action,
+              params,
+              allowed: false,
+              requiresApproval: false,
+              policyReport: { decision: "block", reason: "usdc_limit" },
+            };
+            results.push(r);
+            resultById.set(id, r);
+            continue;
+          }
+
+          const driver = drivers[chain];
+          if (!driver) {
+            const r = { ok: false, id, error: "UNSUPPORTED_CHAIN", chain, adapter, action };
+            results.push(r);
+            resultById.set(id, r);
+            continue;
+          }
+
+          let built: any;
+          try {
+            built = await defaultRegistry.get(adapter).buildTx(action, params, {
+              userPublicKey: kp.publicKey.toBase58(),
+              rpcUrl,
+            });
+          } catch (e: any) {
+            const r = { ok: false, id, error: "UNKNOWN_ADAPTER", adapter, action, message: String(e?.message ?? e) };
+            results.push(r);
+            resultById.set(id, r);
+            continue;
+          }
+
+          const txB64 = built.txB64;
+          const extraSigners = (built as any).signers as Uint8Array[] | undefined;
+
+          const simulation = await driver.simulateTxB64(txB64, { rpcUrl });
+          const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
+
+          const decision = policy
+            ? policy.decide({
+                chain: "solana",
+                network,
+                action: normalizePolicyAction(String((built as any)?.meta?.action ?? action)),
+                sideEffect: "none",
+                simulationOk: simulation.ok,
+                programIdsKnown: known,
+                programIds,
+              } as any)
+            : { decision: "allow" };
+
+          const requiresApproval = true; // v0: any funds-moving step must be explicitly confirmed by user
+          const allowed = decision.decision === "allow" || decision.decision === "confirm";
+
+          const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
+          const now = Date.now();
+
+          const artifact = {
+            chain,
+            adapter,
+            action: String((built as any)?.meta?.action ?? action),
+            params,
+            txB64,
+            simulation,
+            programIds,
+            policy: { decision: decision.decision },
+            traceId: runId,
+            preparedId,
+          };
+          const hash = computeArtifactHash(artifact);
+
+          const parsed = safeParseTx(txB64);
+
+          prepared.set(preparedId, {
+            preparedId,
+            createdAt: now,
+            expiresAt: now + ttlMs,
+            traceId: runId,
+            chain: "solana",
+            adapter,
+            action: String((built as any)?.meta?.action ?? action),
+            params,
+            txB64,
+            recentBlockhash: parsed?.recentBlockhash,
+            extraSigners,
+            simulation,
+            programIds,
+            programIdsKnown: known,
+            network,
+            artifactSchemaVersion: hash.schemaVersion,
+            hashAlg: hash.hashAlg,
+            artifactHash: hash.artifactHash,
+            artifactCanonicalJson: hash.canonicalJson,
+          });
+
+          const out = {
+            ok: true,
+            id,
+            index: idx,
+            dependsOn: deps,
+            adapter,
+            action: String((built as any)?.meta?.action ?? action),
+            preparedId,
+            allowed,
+            requiresApproval,
+            simulation,
+            programIds,
+            programIdsKnown: known,
+            meta: built.meta ?? {},
+            policyReport: decision,
+            artifactSchemaVersion: hash.schemaVersion,
+            hashAlg: hash.hashAlg,
+            artifactHash: hash.artifactHash,
+          };
+
+          results.push(out);
+          resultById.set(id, out);
+        }
+
+        trace.emit({ ts: Date.now(), type: "run.finished", runId, data: { ok: true } });
+
+        try {
+          writeFileSync(join(runDir, "simulate.json"), JSON.stringify({ ok: true, runId, results: results.map((r) => ({ id: r.id, simulation: r.simulation })) }, null, 2));
+          writeFileSync(join(runDir, "policy.json"), JSON.stringify({ ok: true, runId, results: results.map((r) => ({ id: r.id, policyReport: r.policyReport, allowed: r.allowed, requiresApproval: r.requiresApproval })) }, null, 2));
+        } catch {
+          // best-effort
+        }
+
+        return sendJson(res, 200, { ok: true, runId, traceId: runId, order: ordered.map((a) => a.id), results, artifactsDir: runDir });
+      }
+
+      // Workflow v0: explicit confirm/execute wrapper.
+      // POST /v1/workflows/confirm_v0
+      // Body: { preparedId, confirm:true }
+      if (req.method === "POST" && url.pathname === "/v1/workflows/confirm_v0") {
+        const body = await readJsonBody(req);
+        const preparedId = String(body.preparedId || "");
+        const confirm = body.confirm === true;
+        if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID" });
+        if (!confirm) return sendJson(res, 400, { ok: false, error: "CONFIRM_REQUIRED" });
+
+        // Delegate to the existing execute path by reusing its semantics.
+        (req as any).url = "/v1/actions/execute";
+        (req as any).method = "POST";
+        // We can't re-stream the body, so just call the execute handler logic directly by duplicating a minimal call.
+        // (Fall back to the shared code path below if refactoring happens later.)
+        const prior = executed.get(preparedId);
+        if (prior) return sendJson(res, 200, { ok: true, signature: prior.signature, idempotent: true });
+
+        const item = prepared.get(preparedId);
+        if (!item) return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
+        if (item.expiresAt <= Date.now()) {
+          prepared.delete(preparedId);
+          return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
+        }
+
+        const kp = loadSolanaKeypair();
+        if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+
+        const traceId = item.traceId;
+        const trace = new TraceStore(defaultW3rtDir());
+
+        const decision = policy
+          ? policy.decide({
+              chain: "solana",
+              network,
+              action: normalizePolicyAction(String(item.action)),
+              sideEffect: "broadcast",
+              simulationOk: item.simulation?.ok === true,
+              programIds: item.programIds ?? [],
+              programIdsKnown: item.programIdsKnown === true,
+            } as any)
+          : { decision: "allow" };
+
+        if (decision.decision === "block") {
+          trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: "execute", data: { ok: false, policy: decision } });
+          return sendJson(res, 403, { ok: false, error: "POLICY_BLOCK", policyReport: decision, traceId });
+        }
+
+        const raw = Buffer.from(item.txB64, "base64");
+        const tx = VersionedTransaction.deserialize(raw);
+        await refreshTxBlockhash(conn, tx);
+
+        const extra = Array.isArray(item.extraSigners) ? item.extraSigners : [];
+        const extraKps = extra.map((sk) => Keypair.fromSecretKey(sk));
+        tx.sign([kp, ...extraKps]);
+
+        const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
+
+        executed.set(preparedId, { signature: sig, ts: Date.now() });
+        persistExecuted();
+        prepared.delete(preparedId);
+
+        trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: "execute", data: { ok: true, signature: sig } });
+
+        // Persist execute artifact (best-effort)
+        try {
+          const runDir = join(defaultW3rtDir(), "runs", traceId);
+          mkdirSync(runDir, { recursive: true });
+          writeFileSync(join(runDir, "execute.json"), JSON.stringify({ ok: true, runId: traceId, preparedId, signature: sig }, null, 2));
+        } catch {
+          // best-effort
+        }
+
+        return sendJson(res, 200, { ok: true, signature: sig, traceId });
+      }
+
       // Compile a plan (list/DAG of action intents) into chain-specific prepared artifacts.
       // For now: sequential compile for Solana; future: DAG execution + multi-chain drivers.
       if (req.method === "POST" && url.pathname === "/v1/plan/compile") {
