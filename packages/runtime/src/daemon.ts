@@ -1102,6 +1102,51 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return false;
       }
 
+      class HttpError extends Error {
+        status: number;
+        bodyText: string;
+        constructor(status: number, bodyText: string) {
+          super(`HTTP ${status}: ${bodyText}`);
+          this.status = status;
+          this.bodyText = bodyText;
+        }
+      }
+
+      // Global lightweight fetch rate limiter (token bucket)
+      const HTTP_RPS = Math.max(0, Number(process.env.W3RT_HTTP_RPS ?? 0)); // 0 = disabled
+      const HTTP_BURST = Math.max(1, Number(process.env.W3RT_HTTP_BURST ?? 8));
+      let httpTokens = HTTP_RPS > 0 ? HTTP_BURST : 0;
+      let httpLastRefill = Date.now();
+
+      async function acquireHttpToken(): Promise<void> {
+        if (HTTP_RPS <= 0) return;
+        while (true) {
+          const now = Date.now();
+          const elapsed = Math.max(0, now - httpLastRefill);
+          if (elapsed > 0) {
+            const refill = (elapsed / 1000) * HTTP_RPS;
+            if (refill >= 1) {
+              httpTokens = Math.min(HTTP_BURST, httpTokens + Math.floor(refill));
+              httpLastRefill = now;
+            }
+          }
+          if (httpTokens > 0) {
+            httpTokens--;
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      }
+
+      function isRetryableHttpError(e: any): boolean {
+        if (isTimeoutError(e)) return true;
+        const status = Number((e as any)?.status);
+        if (status === 429) return true;
+        // retry transient upstreams
+        if (status >= 500 && status <= 599) return true;
+        return false;
+      }
+
       async function fetchJsonWithRetry(url: URL | string, opts: {
         method?: string;
         headers?: Record<string, string>;
@@ -1124,6 +1169,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const ctrl = new AbortController();
           const timer = setTimeout(() => ctrl.abort(), timeoutMs);
           try {
+            await acquireHttpToken();
             const res = await fetch(url, {
               method,
               headers,
@@ -1131,13 +1177,15 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               signal: ctrl.signal,
             });
             const text = await res.text();
-            if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+            if (!res.ok) throw new HttpError(res.status, text);
             return text ? JSON.parse(text) : null;
           } catch (e: any) {
             lastErr = e;
             clearTimeout(timer);
-            if (attempt >= retries) throw e;
-            const wait = retryDelayMs * Math.pow(2, attempt);
+            if (attempt >= retries || !isRetryableHttpError(e)) throw e;
+            const base = retryDelayMs * Math.pow(2, attempt);
+            const jitter = 0.5 + Math.random();
+            const wait = Math.round(base * jitter);
             await new Promise((r) => setTimeout(r, wait));
           } finally {
             clearTimeout(timer);
@@ -1214,14 +1262,36 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         adapterBackoffUntil.set(String(adapter), Date.now() + ADAPTER_COOLDOWN_MS);
       }
 
+      // Quote concurrency limiter (reduce RPC spikes under load)
+      const QUOTE_CONCURRENCY = Math.max(1, Number(process.env.W3RT_QUOTE_CONCURRENCY ?? 2));
+      let quoteInFlight = 0;
+      const quoteQueue: Array<() => void> = [];
+
+      async function withQuoteSlot<T>(fn: () => Promise<T>): Promise<T> {
+        if (QUOTE_CONCURRENCY <= 0) return await fn();
+        if (quoteInFlight >= QUOTE_CONCURRENCY) {
+          await new Promise<void>((resolve) => quoteQueue.push(resolve));
+        }
+        quoteInFlight++;
+        try {
+          return await fn();
+        } finally {
+          quoteInFlight = Math.max(0, quoteInFlight - 1);
+          const next = quoteQueue.shift();
+          if (next) next();
+        }
+      }
+
       function is429Error(e: any): boolean {
+        const status = Number((e as any)?.status);
+        if (status === 429) return true;
         const msg = String(e?.message ?? e);
         return msg.includes("429") || msg.toLowerCase().includes("too many requests");
       }
 
       function isTimeoutError(e: any): boolean {
         const msg = String(e?.message ?? e);
-        return msg.toLowerCase().includes("timeout") || msg.includes("AbortError") || msg.includes("aborted");
+        return msg.toLowerCase().includes("timeout") || msg.includes("AbortError") || msg.includes("aborted") || msg.includes("ETIMEDOUT");
       }
 
       function recordAdapterEvent(adapter: string, kind: AdapterEventKind) {
@@ -1443,7 +1513,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
           const qJ = inAdapterBackoff("jupiter")
             ? { ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "jupiter temporarily backed off due to 429/timeout" }
-            : await resolveSwapExactInJupiter(params);
+            : await withQuoteSlot(() => resolveSwapExactInJupiter(params));
           const jupEff = qJ.ok ? (() => { try { return BigInt(String(qJ.quote?.outAmount ?? "0")); } catch { return 0n; } })() : 0n;
           const jupPenalty = computeStabilityPenaltyBps("jupiter");
           const jupScore = applyPenalty(jupEff, jupPenalty);
@@ -1507,10 +1577,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const [qM, qR] = await Promise.all([
             meteoraBackoff
               ? Promise.resolve({ ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "meteora temporarily backed off due to 429/timeout" })
-              : resolveSwapExactInMeteora(params, ctx),
+              : withQuoteSlot(() => resolveSwapExactInMeteora(params, ctx)),
             raydiumBackoff
               ? Promise.resolve({ ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "raydium temporarily backed off due to 429/timeout" })
-              : resolveSwapExactInRaydium(params, ctx),
+              : withQuoteSlot(() => resolveSwapExactInRaydium(params, ctx)),
           ]);
 
           const quotesForCache: any[] = [];
@@ -1668,7 +1738,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
             const qJ = inAdapterBackoff("jupiter")
               ? { ok: false, quote: undefined, error: "ADAPTER_BACKOFF", message: "jupiter temporarily backed off due to 429/timeout" }
-              : await resolveSwapExactInJupiter(params);
+              : await withQuoteSlot(() => resolveSwapExactInJupiter(params));
             const jupEff = qJ.ok ? (() => { try { return BigInt(String(qJ.quote?.outAmount ?? "0")); } catch { return 0n; } })() : 0n;
             const jupPenalty = computeStabilityPenaltyBps("jupiter");
             const jupScore = applyPenalty(jupEff, jupPenalty);
