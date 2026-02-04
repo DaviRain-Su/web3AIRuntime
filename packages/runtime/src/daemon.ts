@@ -490,6 +490,13 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
   // Minimal in-process metrics
   const metrics = {
     startedAt: new Date().toISOString(),
+    config: {
+      resolveCacheTtlMs: RESOLVE_CACHE_TTL_MS,
+      adapterCooldownMs: Math.max(0, Number(process.env.W3RT_ADAPTER_COOLDOWN_MS ?? 2500)),
+      quoteConcurrency: Math.max(1, Number(process.env.W3RT_QUOTE_CONCURRENCY ?? 2)),
+      httpRps: Math.max(0, Number(process.env.W3RT_HTTP_RPS ?? 0)),
+      httpBurst: Math.max(1, Number(process.env.W3RT_HTTP_BURST ?? 8)),
+    },
     requests: {
       resolve_v0: { count: 0, ok: 0, fail: 0, avgMs: 0, maxMs: 0 },
       run_v0: { count: 0, ok: 0, fail: 0, avgMs: 0, maxMs: 0 },
@@ -501,6 +508,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       meteora: { ok: 0, fail: 0, r429: 0, timeout: 0 },
       raydium: { ok: 0, fail: 0, r429: 0, timeout: 0 },
     } as Record<string, any>,
+    adapterBackoff: {} as Record<string, any>,
   };
 
   function observeRequest(name: keyof typeof metrics.requests, ms: number, ok: boolean) {
@@ -523,6 +531,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
       // metrics
       if (req.method === "GET" && url.pathname === "/v1/metrics") {
+        snapshotAdapterBackoff();
         return sendJson(res, 200, { ok: true, ...metrics, now: new Date().toISOString() });
       }
 
@@ -1253,6 +1262,19 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         if (ADAPTER_COOLDOWN_MS <= 0) return false;
         const until = adapterBackoffUntil.get(String(adapter)) ?? 0;
         return until > Date.now();
+      }
+
+      function snapshotAdapterBackoff() {
+        const now = Date.now();
+        const out: Record<string, any> = {};
+        for (const [a, until] of adapterBackoffUntil.entries()) {
+          out[a] = {
+            inBackoff: until > now,
+            backoffUntilMs: until,
+            remainingMs: Math.max(0, until - now),
+          };
+        }
+        metrics.adapterBackoff = out;
       }
 
       function tripAdapterBackoff(adapter: string, kind: AdapterEventKind) {
