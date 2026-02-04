@@ -834,10 +834,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           st.ts = now;
 
           // append history snapshot for each pair (for 5m/15m/60m windows)
+          // IMPORTANT: pair/all can be very large. Keeping full history for every pool
+          // quickly explodes memory. We only track pools where either side is SOL or USDC.
+          const trackedMints = new Set([WSOL_MINT, USDC_MINT]);
+          const trackedAddrs = new Set<string>();
+
           for (const p of st.pairs) {
             const addr = String(p?.address ?? "");
             if (!addr) continue;
             if (p?.hide === true || p?.is_blacklisted === true) continue;
+
+            const mx = String(p?.mint_x ?? "");
+            const my = String(p?.mint_y ?? "");
+            if (!trackedMints.has(mx) && !trackedMints.has(my)) continue;
+            trackedAddrs.add(addr);
 
             const cumFee = Number(p?.cumulative_fee_volume ?? 0);
             const cumVol = Number(p?.cumulative_trade_volume ?? 0);
@@ -845,11 +855,25 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             if (!Number.isFinite(cumFee) || !Number.isFinite(cumVol)) continue;
 
             const arr = st.hist.get(addr) ?? [];
+            // avoid duplicate snapshots if refreshPairs() is called multiple times quickly
+            const lastTs = arr.length ? arr[arr.length - 1]!.ts : 0;
+            if (lastTs && now - lastTs < 30_000) {
+              // still update last liquidity best-effort
+              if (arr.length) arr[arr.length - 1]!.liquidity = Number.isFinite(liquidity) ? liquidity : 0;
+              st.hist.set(addr, arr);
+              continue;
+            }
+
             arr.push({ ts: now, cumFee, cumVol, liquidity: Number.isFinite(liquidity) ? liquidity : 0 });
             // keep 2h of history
             const cutoff = now - 2 * 60 * 60_000;
             while (arr.length && arr[0].ts < cutoff) arr.shift();
             st.hist.set(addr, arr);
+          }
+
+          // prune history for pools we no longer track (or that disappeared)
+          for (const addr of st.hist.keys()) {
+            if (!trackedAddrs.has(addr)) st.hist.delete(addr);
           }
         }
 
