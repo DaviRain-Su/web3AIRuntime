@@ -1,5 +1,5 @@
 import http from "node:http";
-import { readFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
@@ -261,6 +261,8 @@ type Prepared = {
   action: string;
   params: Dict;
   txB64: string;
+  recentBlockhash?: string;
+  lastValidBlockHeight?: number;
   // extra signers (secret keys); NEVER returned to client; memory-only
   extraSigners?: Uint8Array[];
   simulation?: { ok: boolean; err?: any; logs?: string[]; unitsConsumed?: number | null };
@@ -345,6 +347,33 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
   }
 
   const prepared = new Map<string, Prepared>();
+
+  // executed (idempotency): preparedId -> { signature, ts }
+  const executedPath = join(w3rtDir, "executed.json");
+  const executed = new Map<string, { signature: string; ts: number }>();
+  try {
+    const raw = readFileSync(executedPath, "utf-8");
+    const j = JSON.parse(raw);
+    if (j && typeof j === "object") {
+      for (const [k, v] of Object.entries(j)) {
+        const sig = (v as any)?.signature;
+        const ts = (v as any)?.ts;
+        if (typeof sig === "string") executed.set(String(k), { signature: sig, ts: typeof ts === "number" ? ts : 0 });
+      }
+    }
+  } catch {
+    // ignore if missing/corrupt
+  }
+
+  function persistExecuted() {
+    try {
+      const obj: Record<string, any> = {};
+      for (const [k, v] of executed.entries()) obj[k] = v;
+      writeFileSync(executedPath, JSON.stringify(obj, null, 2));
+    } catch {
+      // best-effort
+    }
+  }
 
   // cleanup timer
   setInterval(() => {
@@ -567,6 +596,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           action: "transfer",
           params: artifact.params,
           txB64,
+          recentBlockhash: latest.blockhash,
+          lastValidBlockHeight: latest.lastValidBlockHeight,
           simulation,
           programIds,
           programIdsKnown: known,
@@ -602,10 +633,19 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const body = await readJsonBody(req);
         const preparedId = String(body.preparedId || "");
         const confirm = body.confirm === true;
+        const waitForConfirmation = body.waitForConfirmation === true;
+        const commitment = (body.commitment ? String(body.commitment) : "confirmed") as Commitment;
+        const timeoutMs = body.timeoutMs != null ? Number(body.timeoutMs) : 60_000;
+
         if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID" });
         if (!confirm) return sendJson(res, 400, { ok: false, error: "CONFIRM_REQUIRED" });
 
-        // Delegate to the generic execute handler logic by reusing the same storage.
+        // idempotency: if already executed, return stored signature
+        const prior = executed.get(preparedId);
+        if (prior) {
+          return sendJson(res, 200, { ok: true, signature: prior.signature, idempotent: true });
+        }
+
         const item = prepared.get(preparedId);
         if (!item) return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
         if (item.expiresAt <= Date.now()) {
@@ -618,7 +658,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const rpcUrl = resolveSolanaRpc();
         const network = inferNetworkFromRpcUrl(rpcUrl);
-        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+        const conn = new Connection(rpcUrl, { commitment });
 
         const traceId = item.traceId;
         const trace = new TraceStore(defaultW3rtDir());
@@ -648,6 +688,29 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
         trace.emit({ ts: Date.now(), type: "tx.submitted", runId: traceId, data: { signature: sig } });
+
+        executed.set(preparedId, { signature: sig, ts: Date.now() });
+        persistExecuted();
+
+        if (waitForConfirmation) {
+          const blockhash = item.recentBlockhash ?? (tx.message as any).recentBlockhash;
+          const lastValidBlockHeight = item.lastValidBlockHeight;
+          if (typeof blockhash === "string" && typeof lastValidBlockHeight === "number") {
+            const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("CONFIRM_TIMEOUT")), Math.max(1, timeoutMs)));
+            try {
+              const conf: any = await Promise.race([
+                conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, commitment),
+                timeout,
+              ]);
+              trace.emit({ ts: Date.now(), type: "tx.confirmed", runId: traceId, data: { signature: sig, value: conf.value } });
+              prepared.delete(preparedId);
+              return sendJson(res, 200, { ok: true, signature: sig, traceId, policyReport: decision, confirmation: conf.value });
+            } catch (e: any) {
+              prepared.delete(preparedId);
+              return sendJson(res, 200, { ok: true, signature: sig, traceId, policyReport: decision, confirmation: { err: "CONFIRM_TIMEOUT_OR_ERROR", message: String(e?.message ?? e) } });
+            }
+          }
+        }
 
         prepared.delete(preparedId);
         return sendJson(res, 200, { ok: true, signature: sig, traceId, policyReport: decision });
