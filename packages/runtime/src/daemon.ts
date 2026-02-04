@@ -487,6 +487,31 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
   const RESOLVE_CACHE_TTL_MS = Math.max(0, Number(process.env.W3RT_RESOLVE_CACHE_TTL_MS ?? 4000));
   const resolveCache = new Map<string, { ts: number; value: any }>();
 
+  // Minimal in-process metrics
+  const metrics = {
+    startedAt: new Date().toISOString(),
+    requests: {
+      resolve_v0: { count: 0, ok: 0, fail: 0, avgMs: 0, maxMs: 0 },
+      run_v0: { count: 0, ok: 0, fail: 0, avgMs: 0, maxMs: 0 },
+      confirm_v0: { count: 0, ok: 0, fail: 0, avgMs: 0, maxMs: 0 },
+      retry_v0: { count: 0, ok: 0, fail: 0, avgMs: 0, maxMs: 0 },
+    },
+    adapters: {
+      jupiter: { ok: 0, fail: 0, r429: 0, timeout: 0 },
+      meteora: { ok: 0, fail: 0, r429: 0, timeout: 0 },
+      raydium: { ok: 0, fail: 0, r429: 0, timeout: 0 },
+    } as Record<string, any>,
+  };
+
+  function observeRequest(name: keyof typeof metrics.requests, ms: number, ok: boolean) {
+    const r = metrics.requests[name];
+    r.count++;
+    if (ok) r.ok++; else r.fail++;
+    r.maxMs = Math.max(r.maxMs, ms);
+    // incremental avg
+    r.avgMs = r.count === 1 ? ms : r.avgMs + (ms - r.avgMs) / r.count;
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -494,6 +519,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       // health
       if (req.method === "GET" && url.pathname === "/health") {
         return sendJson(res, 200, { ok: true });
+      }
+
+      // metrics
+      if (req.method === "GET" && url.pathname === "/v1/metrics") {
+        return sendJson(res, 200, { ok: true, ...metrics, now: new Date().toISOString() });
       }
 
       // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
@@ -1183,6 +1213,13 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         arr.push({ ts: Date.now(), kind });
         while (arr.length > RESOLVE_STATS_WINDOW) arr.shift();
         adapterResolveStats.set(a, arr);
+
+        // metrics
+        const m = (metrics.adapters[a] = metrics.adapters[a] ?? { ok: 0, fail: 0, r429: 0, timeout: 0 });
+        if (kind === "ok") m.ok++;
+        else if (kind === "429") m.r429++;
+        else if (kind === "timeout") m.timeout++;
+        else m.fail++;
       }
 
       function computeStabilityPenaltyBps(adapter: string): number {
@@ -1336,7 +1373,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         ].join("|");
       }
       if (req.method === "POST" && url.pathname === "/v1/workflows/resolve_v0") {
-        const body = await readJsonBody(req);
+        const t0 = Date.now();
+        let okReq = false;
+        try {
+          const body = await readJsonBody(req);
         const intents = Array.isArray(body?.intents) ? body.intents : [];
         if (!intents.length) return sendJson(res, 400, { ok: false, error: "MISSING_INTENTS" });
 
@@ -1546,21 +1586,29 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           scoringBreakdown: a?.resolvedFrom?.scoringBreakdown ?? null,
         }));
 
-        return sendJson(res, 200, {
+        okReq = true;
+        const resp = {
           ok: true,
           intentsCount: intents.length,
           quotes: outQuotes,
           resolvedActions,
           chosen,
           explain: "Resolver picks Jupiter when available; otherwise compares venues by effectiveOut (prefer minOut) with a stability penalty.",
-        });
+        };
+        return sendJson(res, 200, resp);
+      } finally {
+        observeRequest("resolve_v0", Date.now() - t0, okReq);
+      }
       }
 
       // Workflow v0: single entrypoint that compiles a deterministic plan into prepared artifacts.
       // POST /v1/workflows/run_v0
       // Body: { plan: { actions: [...] } } (or { actions: [...] }) OR { intents: [...] }
       if (req.method === "POST" && url.pathname === "/v1/workflows/run_v0") {
-        const body = await readJsonBody(req);
+        const t0 = Date.now();
+        let okReq = false;
+        try {
+          const body = await readJsonBody(req);
 
         // Accept chain-agnostic intents and resolve them first (phase 1: Jupiter only)
         let actions = normalizeActions(body.actions ?? body.plan?.actions ?? body.plan?.steps);
@@ -2010,14 +2058,22 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
         const summaries = results.filter((r) => r && r.ok).map((r) => r.summary);
 
-        return sendJson(res, 200, { ok: true, runId, traceId: runId, order: ordered.map((a) => a.id), results, summaries, artifactsDir: runDir });
+        okReq = true;
+        const resp = { ok: true, runId, traceId: runId, order: ordered.map((a) => a.id), results, summaries, artifactsDir: runDir };
+        return sendJson(res, 200, resp);
+      } finally {
+        observeRequest("run_v0", Date.now() - t0, okReq);
+      }
       }
 
       // Workflow v0: explicit confirm/execute wrapper.
       // POST /v1/workflows/confirm_v0
       // Body: { preparedId, confirm:true } OR { runId, stepId, confirm:true }
       if (req.method === "POST" && url.pathname === "/v1/workflows/confirm_v0") {
-        const body = await readJsonBody(req);
+        const t0 = Date.now();
+        let okReq = false;
+        try {
+          const body = await readJsonBody(req);
 
         // Allow confirming by (runId, stepId) in addition to preparedId.
         let preparedId = String(body.preparedId || "");
@@ -2165,7 +2221,11 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           // best-effort
         }
 
+        okReq = true;
         return sendJson(res, 200, { ok: true, signature: sig, traceId, runId: traceId, explorerUrl: `https://solana.fm/tx/${sig}` });
+      } finally {
+        observeRequest("confirm_v0", Date.now() - t0, okReq);
+      }
       }
 
       // Compile a plan (list/DAG of action intents) into chain-specific prepared artifacts.
@@ -2639,7 +2699,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       // POST /v1/workflows/retry_v0
       // Body: { runId, stepId }
       if (req.method === "POST" && url.pathname === "/v1/workflows/retry_v0") {
-        const body = await readJsonBody(req);
+        const t0 = Date.now();
+        let okReq = false;
+        try {
+          const body = await readJsonBody(req);
         const runId = String(body.runId || "");
         const stepId = String(body.stepId || "");
         if (!runId) return sendJson(res, 400, { ok: false, error: "MISSING_RUN_ID" });
@@ -2756,6 +2819,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           },
         });
 
+        okReq = true;
         return sendJson(res, 200, {
           ok: true,
           runId,
@@ -2767,6 +2831,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           policyReport: decision,
           summary,
         });
+      } finally {
+        observeRequest("retry_v0", Date.now() - t0, okReq);
+      }
       }
 
       if (req.method === "GET" && url.pathname.startsWith("/v1/traces/")) {
