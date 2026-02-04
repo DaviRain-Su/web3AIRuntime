@@ -1734,6 +1734,22 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             };
             results.push(r);
             resultById.set(id, r);
+
+            writeRunStatus(runId, {
+              status: "failed",
+              steps: {
+                [id]: {
+                  id,
+                  adapter,
+                  action,
+                  state: "failed",
+                  error: r.error,
+                  message: r.message,
+                  summary: r.summary,
+                },
+              },
+            });
+
             continue;
           }
 
