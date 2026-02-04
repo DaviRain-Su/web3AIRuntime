@@ -1296,6 +1296,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         if (!preparedId) return sendJson(res, 400, { ok: false, error: "MISSING_PREPARED_ID" });
         if (!confirm) return sendJson(res, 400, { ok: false, error: "CONFIRM_REQUIRED" });
 
+        // idempotency: if already executed, return stored signature
+        const prior = executed.get(preparedId);
+        if (prior) {
+          return sendJson(res, 200, { ok: true, signature: prior.signature, idempotent: true });
+        }
+
         const item = prepared.get(preparedId);
         if (!item) return sendJson(res, 404, { ok: false, error: "PREPARED_NOT_FOUND_OR_EXPIRED" });
         if (item.expiresAt <= Date.now()) {
@@ -1362,6 +1368,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         tx.sign([kp, ...extraKps]);
 
         const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
+
+        executed.set(preparedId, { signature: sig, ts: Date.now() });
+        persistExecuted();
 
         trace.emit({ ts: Date.now(), type: "step.finished", runId: traceId, stepId: "execute", data: { ok: true, signature: sig } });
 
