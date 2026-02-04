@@ -423,6 +423,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
       // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
       // POST /v1/solana/balance
+      // Optional: includeTokens=true, tokenMint=<mint> to include token balances.
       if (req.method === "POST" && url.pathname === "/v1/solana/balance") {
         const body = await readJsonBody(req);
         const rpcUrl = resolveSolanaRpc();
@@ -453,7 +454,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         const lamports = await conn.getBalance(pubkey);
         const sol = lamports / 1_000_000_000;
 
-        return sendJson(res, 200, {
+        const out: any = {
           ok: true,
           chain: "solana",
           network,
@@ -461,7 +462,33 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           address: pubkey.toBase58(),
           lamports,
           sol,
-        });
+        };
+
+        if (body?.includeTokens === true) {
+          const tokenMint = body?.tokenMint ? String(body.tokenMint) : "";
+          const includeZero = body?.includeZero === true;
+
+          const resTok = tokenMint
+            ? await conn.getParsedTokenAccountsByOwner(pubkey, { mint: new PublicKey(tokenMint) })
+            : await conn.getParsedTokenAccountsByOwner(pubkey, { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") });
+
+          let tokens = resTok.value.map((v) => {
+            const info = (v.account.data as any).parsed.info;
+            const ta = info.tokenAmount;
+            return {
+              pubkey: v.pubkey.toBase58(),
+              mint: info.mint,
+              amount: ta.amount,
+              decimals: ta.decimals,
+              uiAmount: ta.uiAmount,
+            };
+          });
+
+          if (!includeZero) tokens = tokens.filter((t) => Number(t.amount) > 0);
+          out.tokens = tokens;
+        }
+
+        return sendJson(res, 200, out);
       }
 
       // Solana: transfer prepare (build unsigned tx + simulate + policy + returns preparedId). Does NOT broadcast.
