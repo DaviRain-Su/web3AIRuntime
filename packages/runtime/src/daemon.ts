@@ -384,6 +384,10 @@ function notFound(res: http.ServerResponse) {
   sendJson(res, 404, { ok: false, error: "NOT_FOUND" });
 }
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 function registerAdapters() {
   for (const a of [jupiterAdapter, meteoraDlmmAdapter, solendAdapter]) {
     try {
@@ -2580,6 +2584,24 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           // best-effort
         }
 
+        // After broadcast: best-effort confirm/poll and attach a compact tx summary
+        let txStatus: any = null;
+        try {
+          const delays = [800, 1600, 3200];
+          for (let i = 0; i < delays.length; i++) {
+            await sleep(delays[i]);
+            const st = await conn.getSignatureStatuses([sig], { searchTransactionHistory: true });
+            const v = st?.value?.[0] ?? null;
+            if (v) {
+              txStatus = { confirmationStatus: v.confirmationStatus ?? null, err: v.err ?? null, slot: v.slot ?? null };
+              // stop early if finalized or failed
+              if (v.err || v.confirmationStatus === "finalized") break;
+            }
+          }
+        } catch {
+          // ignore
+        }
+
         // Write a user-facing execution report (best-effort)
         try {
           const runDir = join(defaultW3rtDir(), "runs", traceId);
@@ -2608,6 +2630,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             status: st?.status ?? "executed",
             updatedAt: new Date().toISOString(),
             steps: reportSteps,
+            txStatus,
           };
 
           writeFileSync(join(runDir, "report.json"), JSON.stringify(report, null, 2));
@@ -2616,7 +2639,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         }
 
         okReq = true;
-        return sendJson(res, 200, { ok: true, signature: sig, traceId, runId: traceId, explorerUrl: `https://solana.fm/tx/${sig}` });
+        return sendJson(res, 200, {
+          ok: true,
+          signature: sig,
+          traceId,
+          runId: traceId,
+          explorerUrl: `https://solana.fm/tx/${sig}`,
+          txStatus,
+        });
       } finally {
         observeRequest("confirm_v0", Date.now() - t0, okReq);
       }
