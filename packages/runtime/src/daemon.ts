@@ -786,6 +786,134 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         return sendJson(res, 200, { ok: true, path: policyPath, loaded: true, spec: policySpec ?? null });
       }
 
+      // Meteora DLMM monitor (indexer-backed)
+      // GET /v1/meteora/monitor/top?base=SOL|USDC&window=5m|15m|60m&limit=20
+      if (req.method === "GET" && url.pathname === "/v1/meteora/monitor/top") {
+        const base = String(url.searchParams.get("base") ?? "USDC").toUpperCase();
+        const windowStr = String(url.searchParams.get("window") ?? "15m");
+        const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 20)));
+
+        const WSOL_MINT = "So11111111111111111111111111111111111111112";
+        const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        const baseMint = base === "SOL" ? WSOL_MINT : USDC_MINT;
+
+        const windowMs =
+          windowStr === "5m"
+            ? 5 * 60_000
+            : windowStr === "15m"
+              ? 15 * 60_000
+              : windowStr === "60m"
+                ? 60 * 60_000
+                : 15 * 60_000;
+
+        // simple in-memory caches (process lifetime)
+        (globalThis as any).__meteora = (globalThis as any).__meteora ?? {
+          ts: 0,
+          pairs: [] as any[],
+          hist: new Map<string, Array<{ ts: number; cumFee: number; cumVol: number; liquidity: number }>>(),
+        };
+        const st = (globalThis as any).__meteora as {
+          ts: number;
+          pairs: any[];
+          hist: Map<string, Array<{ ts: number; cumFee: number; cumVol: number; liquidity: number }>>;
+        };
+
+        async function refreshPairs() {
+          const now = Date.now();
+          if (st.pairs.length && now - st.ts < 60_000) return;
+          const u = "https://dlmm-api.meteora.ag/pair/all";
+          const res = await fetch(u);
+          const text = await res.text();
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+          const pairs = text ? JSON.parse(text) : [];
+          st.pairs = Array.isArray(pairs) ? pairs : [];
+          st.ts = now;
+
+          // append history snapshot for each pair (for 5m/15m windows)
+          for (const p of st.pairs) {
+            const addr = String(p?.address ?? "");
+            if (!addr) continue;
+            if (p?.hide === true || p?.is_blacklisted === true) continue;
+
+            const cumFee = Number(p?.cumulative_fee_volume ?? 0);
+            const cumVol = Number(p?.cumulative_trade_volume ?? 0);
+            const liquidity = Number(p?.liquidity ?? 0);
+            if (!Number.isFinite(cumFee) || !Number.isFinite(cumVol)) continue;
+
+            const arr = st.hist.get(addr) ?? [];
+            arr.push({ ts: now, cumFee, cumVol, liquidity: Number.isFinite(liquidity) ? liquidity : 0 });
+            // keep 2h of history
+            const cutoff = now - 2 * 60 * 60_000;
+            while (arr.length && arr[0].ts < cutoff) arr.shift();
+            st.hist.set(addr, arr);
+          }
+        }
+
+        function deltaFor(addr: string, now: number) {
+          const arr = st.hist.get(addr) ?? [];
+          if (arr.length < 2) return null;
+          const cutoff = now - windowMs;
+          // find first snapshot >= cutoff
+          let baseSnap = arr[0];
+          for (const s of arr) {
+            if (s.ts >= cutoff) {
+              baseSnap = s;
+              break;
+            }
+          }
+          const last = arr[arr.length - 1];
+          const feeDelta = last.cumFee - baseSnap.cumFee;
+          const volDelta = last.cumVol - baseSnap.cumVol;
+          return {
+            feeDelta: Number.isFinite(feeDelta) ? feeDelta : 0,
+            volDelta: Number.isFinite(volDelta) ? volDelta : 0,
+            liquidity: last.liquidity,
+          };
+        }
+
+        try {
+          await refreshPairs();
+          const now = Date.now();
+
+          const pools = st.pairs
+            .filter((p) => p && p.hide !== true && p.is_blacklisted !== true)
+            .filter((p) => String(p.mint_x) === baseMint || String(p.mint_y) === baseMint)
+            .map((p) => {
+              const addr = String(p.address);
+              const d = deltaFor(addr, now);
+              const feeDelta = d?.feeDelta ?? 0;
+              const volDelta = d?.volDelta ?? 0;
+              const liquidity = Number(d?.liquidity ?? p?.liquidity ?? 0);
+              const score = liquidity > 0 ? feeDelta / liquidity : feeDelta;
+
+              const otherMint = String(p.mint_x) === baseMint ? String(p.mint_y) : String(p.mint_x);
+              return {
+                poolId: addr,
+                name: String(p.name ?? ""),
+                baseMint,
+                otherMint,
+                binStep: Number(p.bin_step ?? 0),
+                baseFeePct: Number(p.base_fee_percentage ?? 0),
+                maxFeePct: Number(p.max_fee_percentage ?? 0),
+                liquidity,
+                window: windowStr,
+                feeDelta,
+                volDelta,
+                score,
+                currentPrice: p.current_price ?? null,
+                lastUpdatedAt: new Date(st.ts).toISOString(),
+                source: "https://dlmm-api.meteora.ag/pair/all",
+              };
+            })
+            .sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
+            .slice(0, limit);
+
+          return sendJson(res, 200, { ok: true, base, window: windowStr, limit, count: pools.length, pools });
+        } catch (e: any) {
+          return sendJson(res, 500, { ok: false, error: "METEORA_MONITOR_FAILED", message: String(e?.message ?? e) });
+        }
+      }
+
       // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
       // POST /v1/solana/balance
       // Optional: includeTokens=true, tokenMint=<mint> to include token balances.
