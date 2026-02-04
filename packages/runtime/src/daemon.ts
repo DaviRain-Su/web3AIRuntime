@@ -3584,6 +3584,15 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
   const addr = server.address();
   const actualPort = typeof addr === "object" && addr ? addr.port : port;
 
+  // best-effort: write port discovery files
+  try {
+    mkdirSync(w3rtDir, { recursive: true });
+    writeFileSync(join(w3rtDir, "daemon.port"), String(actualPort));
+    writeFileSync(join(w3rtDir, "daemon.url"), `http://${host}:${actualPort}`);
+  } catch {
+    // ignore
+  }
+
   // eslint-disable-next-line no-console
   console.log(`w3rt daemon listening on http://${host}:${actualPort}`);
 }
