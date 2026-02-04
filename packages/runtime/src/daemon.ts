@@ -1398,6 +1398,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             effectiveOut: jupEff.toString(),
             stabilityPenaltyBps: jupPenalty,
             scoreOut: jupScore.toString(),
+            cacheHit: false,
             error: qJ.error,
             message: qJ.message,
           });
@@ -1464,6 +1465,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             effectiveOut: meteoraEff.toString(),
             stabilityPenaltyBps: meteoraPenalty,
             scoreOut: meteoraScore.toString(),
+            cacheHit: false,
             error: qM.error,
             message: qM.message,
           };
@@ -1481,6 +1483,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             effectiveOut: raydiumEff.toString(),
             stabilityPenaltyBps: raydiumPenalty,
             scoreOut: raydiumScore.toString(),
+            cacheHit: false,
             error: qR.error,
             message: qR.message,
           };
