@@ -1215,7 +1215,18 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
           const qJ = await resolveSwapExactInJupiter(params);
-          outQuotes.push({ id, adapter: "jupiter", ok: qJ.ok, quote: qJ.quote, error: qJ.error, message: qJ.message });
+          outQuotes.push({
+            id,
+            adapter: "jupiter",
+            ok: qJ.ok,
+            quote: qJ.quote,
+            confidence: qJ.ok ? "high" : "low",
+            explain: qJ.ok
+              ? "Jupiter is an aggregator quote (high confidence)"
+              : "Jupiter quote failed (often due to missing/invalid API key or base URL)",
+            error: qJ.error,
+            message: qJ.message,
+          });
 
           // If Jupiter works, use it (it is already an aggregate router).
           if (qJ.ok) {
@@ -1236,8 +1247,30 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             resolveSwapExactInRaydium(params, ctx),
           ]);
 
-          outQuotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
-          outQuotes.push({ id, adapter: "raydium", ok: qR.ok, quote: qR.quote, error: qR.error, message: qR.message });
+          outQuotes.push({
+            id,
+            adapter: "meteora",
+            ok: qM.ok,
+            quote: qM.quote,
+            confidence: qM.ok ? "high" : "low",
+            explain: qM.ok ? "Meteora DLMM quote derived from on-chain pool state" : "Meteora quote failed",
+            error: qM.error,
+            message: qM.message,
+          });
+          outQuotes.push({
+            id,
+            adapter: "raydium",
+            ok: qR.ok,
+            quote: qR.quote,
+            confidence: qR.ok ? (qR.quote?.kind === "expectedOut" ? "medium" : "low") : "low",
+            explain: qR.ok
+              ? (qR.quote?.kind === "expectedOut"
+                  ? "Raydium CLMM quote computed from tick arrays; expectedOut may drift, minOut is safety bound"
+                  : "Raydium quote uses conservative minOut")
+              : "Raydium quote failed (often RPC 429 / pool fetch)",
+            error: qR.error,
+            message: qR.message,
+          });
 
           const candidates = [
             qM.ok ? { adapter: "meteora", action: "meteora.dlmm.swap_exact_in", q: qM.quote } : null,
@@ -1265,12 +1298,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           });
         }
 
+        const chosen = resolvedActions.map((a) => ({
+          id: a.id,
+          adapter: a.adapter,
+          action: a.action,
+          scoring: a?.resolvedFrom?.scoring ?? (a.adapter === "jupiter" ? "aggregator" : "maxOutAmount"),
+        }));
+
         return sendJson(res, 200, {
           ok: true,
           intentsCount: intents.length,
           quotes: outQuotes,
           resolvedActions,
-          chosen: resolvedActions.map((a) => ({ id: a.id, adapter: a.adapter })),
+          chosen,
+          explain: "Resolver picks Jupiter when available; otherwise compares venues by outAmount (best-effort).",
         });
       }
 
@@ -1308,7 +1349,18 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             const ctx = { userPublicKey: kp.publicKey.toBase58(), rpcUrl };
 
             const qJ = await resolveSwapExactInJupiter(params);
-            quotes.push({ id, adapter: "jupiter", ok: qJ.ok, quote: qJ.quote, error: qJ.error, message: qJ.message });
+            quotes.push({
+              id,
+              adapter: "jupiter",
+              ok: qJ.ok,
+              quote: qJ.quote,
+              confidence: qJ.ok ? "high" : "low",
+              explain: qJ.ok
+                ? "Jupiter is an aggregator quote (high confidence)"
+                : "Jupiter quote failed (often due to missing/invalid API key or base URL)",
+              error: qJ.error,
+              message: qJ.message,
+            });
 
             if (qJ.ok) {
               resolved.push({
@@ -1328,8 +1380,30 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
               resolveSwapExactInRaydium(params, ctx),
             ]);
 
-            quotes.push({ id, adapter: "meteora", ok: qM.ok, quote: qM.quote, error: qM.error, message: qM.message });
-            quotes.push({ id, adapter: "raydium", ok: qR.ok, quote: qR.quote, error: qR.error, message: qR.message });
+            quotes.push({
+              id,
+              adapter: "meteora",
+              ok: qM.ok,
+              quote: qM.quote,
+              confidence: qM.ok ? "high" : "low",
+              explain: qM.ok ? "Meteora DLMM quote derived from on-chain pool state" : "Meteora quote failed",
+              error: qM.error,
+              message: qM.message,
+            });
+            quotes.push({
+              id,
+              adapter: "raydium",
+              ok: qR.ok,
+              quote: qR.quote,
+              confidence: qR.ok ? (qR.quote?.kind === "expectedOut" ? "medium" : "low") : "low",
+              explain: qR.ok
+                ? (qR.quote?.kind === "expectedOut"
+                    ? "Raydium CLMM quote computed from tick arrays; expectedOut may drift, minOut is safety bound"
+                    : "Raydium quote uses conservative minOut")
+                : "Raydium quote failed (often RPC 429 / pool fetch)",
+              error: qR.error,
+              message: qR.message,
+            });
 
             const candidates = [
               qM.ok ? { adapter: "meteora", action: "meteora.dlmm.swap_exact_in", q: qM.quote } : null,
