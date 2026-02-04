@@ -17,6 +17,39 @@ const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 // Source: https://dlmm-api.meteora.ag/pair/all (filtered SOL/USDC)
 const DEFAULT_SOL_USDC_POOL = "BVRbyLjjfSBcoyiYFuxbgKYnWuiFaF9CSXEa5vdSZ9Hh";
 
+// Reduce RPC pressure (public RPCs will 429 easily)
+const blockhashCache: { value: any | null; ts: number } = { value: null, ts: 0 };
+const BLOCKHASH_TTL_MS = Math.max(200, Number(process.env.W3RT_BLOCKHASH_TTL_MS ?? 800));
+
+function is429(e: any): boolean {
+  const msg = String(e?.message ?? e);
+  return msg.includes("429") || msg.toLowerCase().includes("too many requests");
+}
+
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+async function getLatestBlockhashCached(connection: Connection) {
+  const now = Date.now();
+  if (blockhashCache.value && now - blockhashCache.ts < BLOCKHASH_TTL_MS) return blockhashCache.value;
+
+  let lastErr: any;
+  for (let attempt = 0; attempt <= 4; attempt++) {
+    try {
+      const latest = await connection.getLatestBlockhash("confirmed");
+      blockhashCache.value = latest;
+      blockhashCache.ts = Date.now();
+      return latest;
+    } catch (e: any) {
+      lastErr = e;
+      if (!is429(e) || attempt >= 4) throw e;
+      await sleep(500 * Math.pow(2, attempt));
+    }
+  }
+  throw lastErr;
+}
+
 function assertString(x: any, name: string): string {
   if (typeof x !== "string" || !x) throw new Error(`Missing ${name}`);
   return x;
@@ -135,7 +168,7 @@ export const meteoraDlmmAdapter: Adapter = {
       });
 
       const tx = Array.isArray(txOrTxs) ? txOrTxs[0] : txOrTxs;
-      const latest = await connection.getLatestBlockhash("confirmed");
+      const latest = await getLatestBlockhashCached(connection);
       const msg = new TransactionMessage({
         payerKey: new PublicKey(userPublicKey),
         recentBlockhash: latest.blockhash,
@@ -196,7 +229,7 @@ export const meteoraDlmmAdapter: Adapter = {
       });
 
       const tx = Array.isArray(txOrTxs) ? txOrTxs[0] : txOrTxs;
-      const latest = await connection.getLatestBlockhash("confirmed");
+      const latest = await getLatestBlockhashCached(connection);
       const msg = new TransactionMessage({
         payerKey: new PublicKey(userPublicKey),
         recentBlockhash: latest.blockhash,
@@ -239,7 +272,7 @@ export const meteoraDlmmAdapter: Adapter = {
       });
 
       const tx = Array.isArray(txOrTxs) ? txOrTxs[0] : txOrTxs;
-      const latest = await connection.getLatestBlockhash("confirmed");
+      const latest = await getLatestBlockhashCached(connection);
       const msg = new TransactionMessage({
         payerKey: new PublicKey(userPublicKey),
         recentBlockhash: latest.blockhash,

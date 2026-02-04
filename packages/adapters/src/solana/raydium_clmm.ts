@@ -70,6 +70,35 @@ async function withRetry<T>(fn: () => Promise<T>, opts: { retries?: number; base
 const clmmRpcCache = new Map<string, { ts: number; data: any }>();
 const CLMM_CACHE_TTL_MS = 60_000;
 
+// Also cache recent blockhash lookups
+const blockhashCache: { value: any | null; ts: number } = { value: null, ts: 0 };
+const BLOCKHASH_TTL_MS = Math.max(200, Number(process.env.W3RT_BLOCKHASH_TTL_MS ?? 800));
+
+function is429(e: any): boolean {
+  const msg = String(e?.message ?? e);
+  return msg.includes("429") || msg.toLowerCase().includes("too many requests");
+}
+
+async function getLatestBlockhashCached(connection: Connection) {
+  const now = Date.now();
+  if (blockhashCache.value && now - blockhashCache.ts < BLOCKHASH_TTL_MS) return blockhashCache.value;
+
+  let lastErr: any;
+  for (let attempt = 0; attempt <= 4; attempt++) {
+    try {
+      const latest = await connection.getLatestBlockhash("confirmed");
+      blockhashCache.value = latest;
+      blockhashCache.ts = Date.now();
+      return latest;
+    } catch (e: any) {
+      lastErr = e;
+      if (!is429(e) || attempt >= 4) throw e;
+      await sleep(600 * Math.pow(2, attempt));
+    }
+  }
+  throw lastErr;
+}
+
 async function loadClmmPool(params: {
   raydium: any;
   poolId?: string;
@@ -219,8 +248,8 @@ export const raydiumClmmAdapter: Adapter = {
       txVersion: TxVersion.V0,
     });
 
-    // Force a recent blockhash
-    const latest = await connection.getLatestBlockhash("confirmed");
+    // Force a recent blockhash (cached)
+    const latest = await getLatestBlockhashCached(connection);
     const msg = new TransactionMessage({
       payerKey: owner,
       recentBlockhash: latest.blockhash,

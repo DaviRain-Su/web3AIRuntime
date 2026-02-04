@@ -317,8 +317,46 @@ function safeParseTx(txB64: string): { recentBlockhash?: string } | null {
   }
 }
 
+// Simple in-process concurrency limiter (no deps)
+function createLimiter(max: number) {
+  let active = 0;
+  const queue: Array<() => void> = [];
+
+  async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= max) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  }
+
+  return { run };
+}
+
+const RPC_CONCURRENCY = Math.max(1, Number(process.env.W3RT_RPC_CONCURRENCY ?? 6));
+const rpcLimiter = createLimiter(RPC_CONCURRENCY);
+
+// Short TTL cache for frequently-called RPCs
+const blockhashCache: { value: any | null; ts: number } = { value: null, ts: 0 };
+const BLOCKHASH_TTL_MS = Math.max(200, Number(process.env.W3RT_BLOCKHASH_TTL_MS ?? 800));
+
+async function getLatestBlockhashCached(conn: Connection) {
+  const now = Date.now();
+  if (blockhashCache.value && now - blockhashCache.ts < BLOCKHASH_TTL_MS) return blockhashCache.value;
+  const latest = await rpcLimiter.run(() => conn.getLatestBlockhash("confirmed"));
+  blockhashCache.value = latest;
+  blockhashCache.ts = now;
+  return latest;
+}
+
 async function refreshTxBlockhash(conn: Connection, tx: VersionedTransaction) {
-  const latest = await conn.getLatestBlockhash("confirmed");
+  const latest = await getLatestBlockhashCached(conn);
   // Mutate in-place (works for v0 messages)
   (tx.message as any).recentBlockhash = latest.blockhash;
   return latest;
@@ -618,7 +656,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           summary.willCreateAta = willCreateAta;
         }
 
-        const latest = await conn.getLatestBlockhash("confirmed");
+        const latest = await getLatestBlockhashCached(conn);
         const msg = new TransactionMessage({
           payerKey: kp.publicKey,
           recentBlockhash: latest.blockhash,
