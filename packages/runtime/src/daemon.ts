@@ -12,6 +12,7 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
+  TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
   type Commitment,
@@ -26,6 +27,50 @@ import { PolicyEngine, type PolicyConfig } from "@w3rt/policy";
 import { TraceStore } from "@w3rt/trace";
 
 import { loadSolanaKeypair, resolveSolanaRpc } from "./run.js";
+
+// Minimal SPL helpers (copied from runtime solana tool):
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+function getAssociatedTokenAddressSync(mint: PublicKey, owner: PublicKey): PublicKey {
+  // ATA = findProgramAddress([owner, tokenProgram, mint], associatedTokenProgram)
+  const [ata] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  return ata;
+}
+
+function createAssociatedTokenAccountIx(params: { payer: PublicKey; ata: PublicKey; owner: PublicKey; mint: PublicKey }): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.ata, isSigner: false, isWritable: true },
+      { pubkey: params.owner, isSigner: false, isWritable: false },
+      { pubkey: params.mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.alloc(0),
+  });
+}
+
+function createSplTransferIx(params: { source: PublicKey; dest: PublicKey; owner: PublicKey; amount: bigint }): TransactionInstruction {
+  // SPL Token Transfer (instruction=3)
+  const data = Buffer.alloc(1 + 8);
+  data.writeUInt8(3, 0);
+  data.writeBigUInt64LE(params.amount, 1);
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: params.source, isSigner: false, isWritable: true },
+      { pubkey: params.dest, isSigner: false, isWritable: true },
+      { pubkey: params.owner, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+}
 
 type Dict = Record<string, any>;
 
@@ -358,6 +403,195 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           address: pubkey.toBase58(),
           lamports,
           sol,
+        });
+      }
+
+      // Solana: transfer prepare (build unsigned tx + simulate + policy + returns preparedId). Does NOT broadcast.
+      // POST /v1/solana/transfer/prepare
+      if (req.method === "POST" && url.pathname === "/v1/solana/transfer/prepare") {
+        const body = await readJsonBody(req);
+
+        const kp = loadSolanaKeypair();
+        if (!kp) return sendJson(res, 400, { ok: false, error: "MISSING_SOLANA_KEYPAIR" });
+
+        const rpcUrl = resolveSolanaRpc();
+        const network = inferNetworkFromRpcUrl(rpcUrl);
+
+        const toRaw = String(body?.to ?? "").trim();
+        if (!toRaw) return sendJson(res, 400, { ok: false, error: "MISSING_TO" });
+
+        let to: PublicKey;
+        try {
+          to = new PublicKey(toRaw);
+        } catch {
+          return sendJson(res, 400, { ok: false, error: "INVALID_TO", to: toRaw });
+        }
+
+        const amountUi = Number(body?.amount);
+        if (!Number.isFinite(amountUi) || amountUi <= 0) {
+          return sendJson(res, 400, { ok: false, error: "INVALID_AMOUNT", amount: body?.amount });
+        }
+
+        const tokenMintRaw = body?.tokenMint ? String(body.tokenMint).trim() : "";
+        const createAta = body?.createAta !== false;
+
+        const conn = new Connection(rpcUrl, { commitment: "confirmed" as Commitment });
+
+        const instructions: TransactionInstruction[] = [];
+        const summary: any = { from: kp.publicKey.toBase58(), to: to.toBase58() };
+
+        if (!tokenMintRaw) {
+          // SOL transfer
+          const lamports = Math.round(amountUi * 1_000_000_000);
+          instructions.push(
+            SystemProgram.transfer({
+              fromPubkey: kp.publicKey,
+              toPubkey: to,
+              lamports,
+            })
+          );
+          summary.kind = "sol_transfer";
+          summary.amountUi = amountUi;
+          summary.lamports = lamports;
+        } else {
+          // SPL transfer
+          let tokenMint: PublicKey;
+          try {
+            tokenMint = new PublicKey(tokenMintRaw);
+          } catch {
+            return sendJson(res, 400, { ok: false, error: "INVALID_TOKEN_MINT", tokenMint: tokenMintRaw });
+          }
+
+          const mintAcc = await conn.getParsedAccountInfo(tokenMint, "confirmed");
+          const decimals = (mintAcc.value?.data as any)?.parsed?.info?.decimals;
+          if (typeof decimals !== "number") {
+            return sendJson(res, 400, { ok: false, error: "TOKEN_DECIMALS_NOT_FOUND", tokenMint: tokenMint.toBase58() });
+          }
+
+          const amountBase = BigInt(Math.round(amountUi * Math.pow(10, decimals)));
+          const fromAta = getAssociatedTokenAddressSync(tokenMint, kp.publicKey);
+          const toAta = getAssociatedTokenAddressSync(tokenMint, to);
+
+          let willCreateAta = false;
+          if (createAta) {
+            const info = await conn.getAccountInfo(toAta, "confirmed");
+            if (!info) {
+              willCreateAta = true;
+              instructions.push(
+                createAssociatedTokenAccountIx({
+                  payer: kp.publicKey,
+                  ata: toAta,
+                  owner: to,
+                  mint: tokenMint,
+                })
+              );
+            }
+          }
+
+          instructions.push(createSplTransferIx({ source: fromAta, dest: toAta, owner: kp.publicKey, amount: amountBase }));
+
+          summary.kind = "spl_transfer";
+          summary.amountUi = amountUi;
+          summary.amountBase = amountBase.toString();
+          summary.decimals = decimals;
+          summary.tokenMint = tokenMint.toBase58();
+          summary.fromAta = fromAta.toBase58();
+          summary.toAta = toAta.toBase58();
+          summary.willCreateAta = willCreateAta;
+        }
+
+        const latest = await conn.getLatestBlockhash("confirmed");
+        const msg = new TransactionMessage({
+          payerKey: kp.publicKey,
+          recentBlockhash: latest.blockhash,
+          instructions,
+        }).compileToV0Message();
+
+        const tx = new VersionedTransaction(msg);
+        const txB64 = Buffer.from(tx.serialize()).toString("base64");
+
+        const drivers = makeDriverRegistry(rpcUrl);
+        const driver = drivers.solana;
+        const simulation = await driver.simulateTxB64(txB64, { rpcUrl });
+        const { ids: programIds, known } = await driver.extractIdsFromTxB64(txB64, { rpcUrl });
+
+        const decision = policy
+          ? policy.decide({
+              chain: "solana",
+              network,
+              // Policy allowlist expects generic verbs like "transfer".
+              action: "transfer",
+              // This endpoint is prepare-only (no broadcast).
+              sideEffect: "none",
+              simulationOk: simulation.ok,
+              programIdsKnown: known,
+              programIds,
+            } as any)
+          : { decision: simulation.ok ? "confirm" : "block" };
+
+        const requiresApproval = decision.decision === "confirm";
+        const allowed = decision.decision === "allow" || decision.decision === "confirm";
+
+        const preparedId = `prep_${crypto.randomUUID().slice(0, 16)}`;
+        const now = Date.now();
+
+        const traceId = `trace_${crypto.randomUUID().slice(0, 16)}`;
+        const trace = new TraceStore(w3rtDir);
+        trace.emit({ ts: now, type: "tx.built", runId: traceId, data: { summary } });
+        trace.emit({ ts: now, type: "tx.simulated", runId: traceId, data: { ok: simulation.ok, err: simulation.err, unitsConsumed: simulation.unitsConsumed } });
+        trace.emit({ ts: now, type: "policy.decision", runId: traceId, data: { decision } });
+
+        const artifact = {
+          chain: "solana",
+          adapter: "internal",
+          action: "solana.transfer.prepare",
+          params: { to: to.toBase58(), amount: amountUi, tokenMint: tokenMintRaw || null, createAta },
+          txB64,
+          simulation,
+          programIds,
+          policy: { decision: decision.decision },
+          traceId,
+          preparedId,
+          summary,
+        };
+        const hash = computeArtifactHash(artifact);
+
+        prepared.set(preparedId, {
+          preparedId,
+          createdAt: now,
+          expiresAt: now + ttlMs,
+          traceId,
+          chain: "solana",
+          adapter: "internal",
+          action: "solana.transfer.prepare",
+          params: artifact.params,
+          txB64,
+          simulation,
+          programIds,
+          programIdsKnown: known,
+          network,
+          artifactSchemaVersion: hash.schemaVersion,
+          hashAlg: hash.hashAlg,
+          artifactHash: hash.artifactHash,
+          artifactCanonicalJson: hash.canonicalJson,
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          preparedId,
+          allowed,
+          requiresApproval,
+          network,
+          rpcUrl,
+          from: kp.publicKey.toBase58(),
+          summary,
+          simulation,
+          programIds,
+          programIdsKnown: known,
+          policyReport: decision,
+          artifactSchemaVersion: hash.schemaVersion,
+          hashAlg: hash.hashAlg,
+          artifactHash: hash.artifactHash,
         });
       }
 
