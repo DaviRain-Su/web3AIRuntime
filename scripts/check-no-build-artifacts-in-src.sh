@@ -4,7 +4,12 @@ set -euo pipefail
 # Fail if TS build artifacts are committed/generated under any packages/**/src
 # We only allow .ts/.tsx sources in src.
 
-bad=$(find packages -path '*/src/*' \( -name '*.js' -o -name '*.d.ts' -o -name '*.js.map' \) -print || true)
+bad=$(find packages \
+  -path '*/src/*' \
+  -not -path '*/node_modules/*' \
+  -not -path '*/dist/*' \
+  \( -name '*.js' -o -name '*.d.ts' -o -name '*.js.map' \) \
+  -print || true)
 
 if [[ -n "${bad}" ]]; then
   echo "ERROR: Found build artifacts under packages/**/src (should be in dist/):" >&2
