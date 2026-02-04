@@ -3,6 +3,7 @@ export * from "./registry.js";
 
 export * from "./solana/jupiter.js";
 export * from "./solana/meteora_dlmm.js";
+export * from "./solana/raydium_clmm.js";
 export * from "./solana/solend.js";
 
 export * from "./evm/zeroex.js";
@@ -12,10 +13,11 @@ export * from "./evm/zeroex.js";
 import { defaultRegistry } from "./registry.js";
 import { jupiterAdapter } from "./solana/jupiter.js";
 import { meteoraDlmmAdapter } from "./solana/meteora_dlmm.js";
+import { raydiumClmmAdapter } from "./solana/raydium_clmm.js";
 import { solendAdapter } from "./solana/solend.js";
 import { zeroExAdapter } from "./evm/zeroex.js";
 
-for (const a of [jupiterAdapter, meteoraDlmmAdapter, solendAdapter, zeroExAdapter]) {
+for (const a of [jupiterAdapter, meteoraDlmmAdapter, raydiumClmmAdapter, solendAdapter, zeroExAdapter]) {
   try {
     defaultRegistry.register(a);
   } catch {
