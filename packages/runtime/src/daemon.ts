@@ -1316,9 +1316,25 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         }
       }
 
-      // Workflow v0: resolve chain-agnostic intents into concrete adapter actions (phase 1: Jupiter only)
+      // Workflow v0: resolve chain-agnostic intents into concrete adapter actions.
       // POST /v1/workflows/resolve_v0
       // Body: { intents: [...] }
+
+      // Short TTL cache for resolve results to reduce RPC pressure.
+      const RESOLVE_CACHE_TTL_MS = Math.max(0, Number(process.env.W3RT_RESOLVE_CACHE_TTL_MS ?? 4000));
+      const resolveCache = new Map<string, { ts: number; value: any }>();
+
+      function resolveCacheKey(intent: any): string {
+        const p = intent?.params ?? {};
+        return [
+          String(intent?.chain ?? "solana"),
+          String(intent?.type ?? ""),
+          String(p.inputMint ?? ""),
+          String(p.outputMint ?? ""),
+          String(p.amount ?? ""),
+          String(p.slippageBps ?? ""),
+        ].join("|");
+      }
       if (req.method === "POST" && url.pathname === "/v1/workflows/resolve_v0") {
         const body = await readJsonBody(req);
         const intents = Array.isArray(body?.intents) ? body.intents : [];
@@ -1341,6 +1357,19 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           if (type !== "swap_exact_in") {
             outQuotes.push({ id, ok: false, error: "UNSUPPORTED_INTENT", type });
             continue;
+          }
+
+          // Cache check (best-effort)
+          const key = resolveCacheKey({ chain, type, params });
+          if (RESOLVE_CACHE_TTL_MS > 0) {
+            const hit = resolveCache.get(key);
+            if (hit && Date.now() - hit.ts < RESOLVE_CACHE_TTL_MS) {
+              // Expand cached results with this request's id
+              const cached = hit.value;
+              for (const q of cached.quotes ?? []) outQuotes.push({ ...q, id, cacheHit: true });
+              for (const a of cached.resolvedActions ?? []) resolvedActions.push({ ...a, id });
+              continue;
+            }
           }
 
           // Phase 2: try Jupiter, then compare Meteora vs Raydium (best-effort outAmount).
@@ -1375,7 +1404,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
           // If Jupiter works, use it (it is already an aggregate router).
           if (qJ.ok) {
-            resolvedActions.push({
+            const act = {
               id,
               dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
               chain: "solana",
@@ -1392,7 +1421,20 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
                   scoreOut: jupScore.toString(),
                 },
               },
-            });
+            };
+            resolvedActions.push(act);
+
+            // Write cache entry
+            if (RESOLVE_CACHE_TTL_MS > 0) {
+              resolveCache.set(key, {
+                ts: Date.now(),
+                value: {
+                  quotes: [{ ...outQuotes[outQuotes.length - 1], id: "__ID__", cacheHit: false }],
+                  resolvedActions: [{ ...act, id: "__ID__" }],
+                },
+              });
+            }
+
             continue;
           }
 
@@ -1400,6 +1442,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             resolveSwapExactInMeteora(params, ctx),
             resolveSwapExactInRaydium(params, ctx),
           ]);
+
+          const quotesForCache: any[] = [];
+          const actionsForCache: any[] = [];
 
           const meteoraEff = qM.ok ? computeEffectiveOut(qM.quote) : 0n;
           const meteoraPenalty = computeStabilityPenaltyBps("meteora");
@@ -1409,7 +1454,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           const raydiumPenalty = computeStabilityPenaltyBps("raydium");
           const raydiumScore = applyPenalty(raydiumEff, raydiumPenalty);
 
-          outQuotes.push({
+          const qmOut = {
             id,
             adapter: "meteora",
             ok: qM.ok,
@@ -1421,8 +1466,8 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             scoreOut: meteoraScore.toString(),
             error: qM.error,
             message: qM.message,
-          });
-          outQuotes.push({
+          };
+          const qrOut = {
             id,
             adapter: "raydium",
             ok: qR.ok,
@@ -1438,7 +1483,12 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
             scoreOut: raydiumScore.toString(),
             error: qR.error,
             message: qR.message,
-          });
+          };
+
+          outQuotes.push(qmOut);
+          outQuotes.push(qrOut);
+          quotesForCache.push({ ...qmOut, id: "__ID__" });
+          quotesForCache.push({ ...qrOut, id: "__ID__" });
 
           const candidates = [
             qM.ok ? { adapter: "meteora", action: "meteora.dlmm.swap_exact_in", q: qM.quote } : null,
@@ -1458,7 +1508,7 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
           scored.sort((a, b) => (b.scoreOut > a.scoreOut ? 1 : b.scoreOut < a.scoreOut ? -1 : 0));
 
           const chosen = scored[0];
-          resolvedActions.push({
+          const act = {
             id,
             dependsOn: Array.isArray(it?.dependsOn) ? it.dependsOn : [],
             chain: "solana",
@@ -1475,7 +1525,14 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
                 scoreOut: chosen.scoreOut.toString(),
               },
             },
-          });
+          };
+          resolvedActions.push(act);
+
+          // cache this resolution
+          actionsForCache.push({ ...act, id: "__ID__" });
+          if (RESOLVE_CACHE_TTL_MS > 0) {
+            resolveCache.set(key, { ts: Date.now(), value: { quotes: quotesForCache, resolvedActions: actionsForCache } });
+          }
         }
 
         const chosen = resolvedActions.map((a) => ({
