@@ -483,6 +483,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
     }
   }, 10_000).unref();
 
+  // Resolve cache (process-wide) to reduce RPC pressure
+  const RESOLVE_CACHE_TTL_MS = Math.max(0, Number(process.env.W3RT_RESOLVE_CACHE_TTL_MS ?? 4000));
+  const resolveCache = new Map<string, { ts: number; value: any }>();
+
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -1319,10 +1323,6 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
       // Workflow v0: resolve chain-agnostic intents into concrete adapter actions.
       // POST /v1/workflows/resolve_v0
       // Body: { intents: [...] }
-
-      // Short TTL cache for resolve results to reduce RPC pressure.
-      const RESOLVE_CACHE_TTL_MS = Math.max(0, Number(process.env.W3RT_RESOLVE_CACHE_TTL_MS ?? 4000));
-      const resolveCache = new Map<string, { ts: number; value: any }>();
 
       function resolveCacheKey(intent: any): string {
         const p = intent?.params ?? {};
