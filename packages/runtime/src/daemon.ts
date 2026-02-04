@@ -478,7 +478,8 @@ function registerAdapters() {
 export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?: string; preparedTtlMs?: number } = {}) {
   registerAdapters();
 
-  const port = opts.port ?? Number(process.env.W3RT_DAEMON_PORT ?? 8787);
+  const portRaw = opts.port ?? Number(process.env.W3RT_DAEMON_PORT ?? 8787);
+  const port = portRaw === 0 ? 0 : Number(portRaw);
   const host = opts.host ?? String(process.env.W3RT_DAEMON_HOST ?? "127.0.0.1");
   const w3rtDir = opts.w3rtDir ?? defaultW3rtDir();
   const ttlMs = opts.preparedTtlMs ?? 15 * 60 * 1000;
@@ -631,7 +632,9 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
 
       // health
       if (req.method === "GET" && url.pathname === "/health") {
-        return sendJson(res, 200, { ok: true });
+        const addr = server.address();
+        const actualPort = typeof addr === "object" && addr ? addr.port : port;
+        return sendJson(res, 200, { ok: true, host, port: actualPort });
       }
 
       // metrics
@@ -3410,6 +3413,10 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
   });
 
   await new Promise<void>((resolve) => server.listen(port, host, resolve));
+
+  const addr = server.address();
+  const actualPort = typeof addr === "object" && addr ? addr.port : port;
+
   // eslint-disable-next-line no-console
-  console.log(`w3rt daemon listening on http://${host}:${port}`);
+  console.log(`w3rt daemon listening on http://${host}:${actualPort}`);
 }
