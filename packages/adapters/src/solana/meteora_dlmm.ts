@@ -112,14 +112,20 @@ export const meteoraDlmmAdapter: Adapter = {
       const binArrays = await pool.getBinArrayForSwap(swapYtoX);
       const slip = Math.max(0, Math.min(10_000, Math.floor(slippageBps)));
 
-      // SDK expects slippage in bps (per README examples pass BN(1)); we pass slippageBps.
-      const quote = await pool.swapQuote(amount, swapYtoX, new BN(slip), binArrays);
+      // NOTE: The DLMM SDK's slippage parameter semantics have been inconsistent across versions.
+      // We derive `minOutAmount` ourselves from the quoted `outAmount` + user slippage (bps).
+      const quote: any = await pool.swapQuote(amount, swapYtoX, new BN(0), binArrays);
+
+      const outAmount = quote?.outAmount as BN | undefined;
+      if (!BN.isBN(outAmount)) throw new Error("DLMM swapQuote missing outAmount");
+
+      const minOutAmount = outAmount.mul(new BN(10_000 - slip)).div(new BN(10_000));
 
       const txOrTxs = await pool.swap({
         inToken: new PublicKey(inputMint),
         outToken: new PublicKey(outputMint),
         inAmount: amount,
-        minOutAmount: quote.minOutAmount,
+        minOutAmount,
         lbPair: new PublicKey(poolAddress),
         user: new PublicKey(userPublicKey),
         binArraysPubkey: quote.binArraysPubkey,
