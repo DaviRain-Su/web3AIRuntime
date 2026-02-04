@@ -45,6 +45,31 @@ async function initRaydium(connection: Connection, owner: PublicKey, cluster: "m
   } as any);
 }
 
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+async function withRetry<T>(fn: () => Promise<T>, opts: { retries?: number; baseDelayMs?: number } = {}): Promise<T> {
+  const retries = opts.retries ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 600;
+
+  let lastErr: any;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      lastErr = e;
+      if (attempt >= retries) break;
+      await sleep(baseDelayMs * Math.pow(2, attempt));
+    }
+  }
+  throw lastErr;
+}
+
+// In-memory cache to reduce RPC pressure (public RPCs will 429 easily)
+const clmmRpcCache = new Map<string, { ts: number; data: any }>();
+const CLMM_CACHE_TTL_MS = 60_000;
+
 async function loadClmmPool(params: {
   raydium: any;
   poolId?: string;
@@ -83,7 +108,12 @@ async function loadClmmPool(params: {
     }
 
     // RPC provides poolKeys + computePoolInfo + tickData (required for building swap ix).
-    const data = await raydium.clmm.getPoolInfoFromRpc(id);
+    const cached = clmmRpcCache.get(id);
+    const now = Date.now();
+    const data = cached && now - cached.ts < CLMM_CACHE_TTL_MS
+      ? cached.data
+      : await withRetry(() => raydium.clmm.getPoolInfoFromRpc(id), { retries: 4, baseDelayMs: 800 });
+    if (!cached || now - cached.ts >= CLMM_CACHE_TTL_MS) clmmRpcCache.set(id, { ts: now, data });
     poolInfo = data.poolInfo as ApiV3PoolInfoConcentratedItem;
     poolKeys = data.poolKeys as ClmmKeys;
     clmmPoolInfo = data.computePoolInfo as ComputeClmmPoolInfo;
