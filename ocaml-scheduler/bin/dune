@@ -1,5 +1,5 @@
 (executable
  (name main)
  (public_name w3rt-scheduler)
- (libraries w3rt_scheduler cmdliner yojson)
+ (libraries w3rt_scheduler cmdliner yojson unix)
 )

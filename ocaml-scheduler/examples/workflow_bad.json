@@ -1,0 +1,11 @@
+{
+  "name": "bad-swap",
+  "actions": [
+    {
+      "id": "swap_exec",
+      "tool": "w3rt_swap_exec",
+      "params": {"confirm": "YES"},
+      "dependsOn": []
+    }
+  ]
+}

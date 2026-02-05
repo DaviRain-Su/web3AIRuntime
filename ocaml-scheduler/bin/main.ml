@@ -1,5 +1,9 @@
 open Cmdliner
 
+(* Prevent interactive pagers in non-interactive/automation environments *)
+let () =
+  try Unix.putenv "CMDLINER_TERMPAGER" "cat" with _ -> ()
+
 let write_file path s =
   let oc = open_out path in
   output_string oc s;
