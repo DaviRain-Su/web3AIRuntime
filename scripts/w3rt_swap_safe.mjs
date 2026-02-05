@@ -6,6 +6,7 @@
  * Commands:
  *   quote  --from SOL --to USDC --amount 0.01 --slippage-bps 50 [--allow-fallback]
  *   exec   --quote-id <id> --confirm I_CONFIRM
+ *   show  --run-id <runId> | --path <swap.json>
  *
  * Notes:
  * - Stores quotes in ~/.w3rt/tmp/swap-quotes.json (best-effort)
@@ -99,6 +100,8 @@ function parse(argv) {
     else if (a === '--allow-fallback') args.allowFallback = true;
     else if (a === '--quote-id') args.quoteId = argv[++i];
     else if (a === '--confirm') args.confirm = argv[++i];
+    else if (a === '--run-id') args.runId = argv[++i];
+    else if (a === '--path') args.path = argv[++i];
   }
   return { cmd, args };
 }
@@ -181,6 +184,39 @@ async function main() {
     return;
   }
 
+  if (cmd === 'show') {
+    const runId = args.runId;
+    const pathArg = args.path;
+
+    let p;
+    if (pathArg) {
+      p = String(pathArg);
+    } else if (runId) {
+      p = join(runsDir(), String(runId), 'swap.json');
+    } else {
+      throw new Error('Usage: show --run-id <runId>  (or: show --path <swap.json>)');
+    }
+
+    if (!existsSync(p)) throw new Error(`Artifact not found: ${p}`);
+    const a = JSON.parse(readFileSync(p, 'utf-8'));
+
+    const lines = [];
+    lines.push('## w3rt swap artifact');
+    lines.push(`runId: ${a.runId}`);
+    lines.push(`createdAt: ${a.createdAt}`);
+    lines.push(`route: ${a.route}`);
+    lines.push(`quoteId: ${a.quoteId}`);
+    if (a?.input?.amountLamports) lines.push(`amountLamports: ${a.input.amountLamports}`);
+    if (a?.input?.requestedSlippageBps != null) lines.push(`slippageBps: ${a.input.requestedSlippageBps}`);
+    lines.push(`signature: ${a?.tx?.signature}`);
+    lines.push(`solscan: ${a?.tx?.explorerUrl}`);
+    if (a?.simulation?.unitsConsumed != null) lines.push(`unitsConsumed: ${a.simulation.unitsConsumed}`);
+    if (a?.simulation?.simulatedOutAmount != null) lines.push(`simulatedOutAmount: ${a.simulation.simulatedOutAmount}`);
+
+    console.log(lines.join('\n'));
+    return;
+  }
+
   if (cmd === 'exec') {
     const quoteId = args.quoteId;
     const confirm = args.confirm;
@@ -247,7 +283,7 @@ async function main() {
     return;
   }
 
-  console.log('Usage:\n  node scripts/w3rt_swap_safe.mjs quote --from SOL --to USDC --amount 0.01 --slippage-bps 50 [--allow-fallback]\n  node scripts/w3rt_swap_safe.mjs exec --quote-id <id> --confirm I_CONFIRM');
+  console.log('Usage:\n  node scripts/w3rt_swap_safe.mjs quote --from SOL --to USDC --amount 0.01 --slippage-bps 50 [--allow-fallback]\n  node scripts/w3rt_swap_safe.mjs exec --quote-id <id> --confirm I_CONFIRM\n  node scripts/w3rt_swap_safe.mjs show --run-id <runId>');
   process.exit(1);
 }
 
