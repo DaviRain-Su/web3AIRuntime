@@ -954,6 +954,66 @@ export async function startDaemon(opts: { port?: number; host?: string; w3rtDir?
         }
       }
 
+      // Meteora DLMM monitor: preformatted Telegram text (to keep cron logic dumb & reliable)
+      // GET /v1/meteora/monitor/telegram?window=5m&rank=fees&minLiquidity=10000
+      if (req.method === "GET" && url.pathname === "/v1/meteora/monitor/telegram") {
+        const windowStr = String(url.searchParams.get("window") ?? "5m");
+        const rank = String(url.searchParams.get("rank") ?? "fees");
+        const minLiquidity = Math.max(0, Number(url.searchParams.get("minLiquidity") ?? 10000));
+        const addr = server.address();
+        const actualPort = typeof addr === "object" && addr ? addr.port : port;
+        const daemonUrl = `http://${host}:${actualPort}`;
+
+        try {
+          const qs = `window=${encodeURIComponent(windowStr)}&rank=${encodeURIComponent(rank)}&minLiquidity=${encodeURIComponent(String(minLiquidity))}&limit=3`;
+
+          const u1 = `${daemonUrl}/v1/meteora/monitor/top?base=USDC&${qs}`;
+          const u2 = `${daemonUrl}/v1/meteora/monitor/top?base=SOL&${qs}`;
+
+          const [r1, r2] = await Promise.all([fetch(u1).then((r) => r.json()), fetch(u2).then((r) => r.json())]);
+
+          const usdcPools = Array.isArray((r1 as any)?.pools) ? (r1 as any).pools : [];
+          const solPools = Array.isArray((r2 as any)?.pools) ? (r2 as any).pools : [];
+
+          function fmtNum(x: any) {
+            const n = Number(x);
+            if (!Number.isFinite(n)) return "0";
+            // keep it readable; fees can be <1 or huge
+            return n >= 100 ? n.toFixed(2) : n >= 1 ? n.toFixed(2) : n.toFixed(4);
+          }
+
+          function fmtLine(p: any, i: number) {
+            const name = String(p?.name ?? "").trim() || "(unknown)";
+            const feeDelta = fmtNum(p?.feeDelta);
+            const liq = fmtNum(p?.liquidity);
+            const poolId = String(p?.poolId ?? "").trim();
+            return `${i + 1}) ${name} | feeΔ ${feeDelta} | liq ${liq} | ${poolId}`;
+          }
+
+          const ts = new Date().toISOString();
+          const lines: string[] = [];
+          lines.push(`Meteora ${windowStr} Top fees (USDC+SOL)`);
+          lines.push(ts);
+          lines.push(`Daemon: ${daemonUrl}`);
+          lines.push("");
+          lines.push("USDC/meme:");
+          if (usdcPools.length) lines.push(...usdcPools.slice(0, 3).map(fmtLine));
+          else lines.push("(no data)");
+          lines.push("");
+          lines.push("SOL/meme:");
+          if (solPools.length) lines.push(...solPools.slice(0, 3).map(fmtLine));
+          else lines.push("(no data)");
+
+          const text = lines.join("\n");
+
+          const anyNonZero = [...usdcPools, ...solPools].some((p: any) => Number(p?.feeDelta ?? 0) > 0);
+
+          return sendJson(res, 200, { ok: true, shouldSend: true, anyNonZero, text });
+        } catch (e: any) {
+          return sendJson(res, 500, { ok: false, error: "METEORA_TELEGRAM_FAILED", message: String(e?.message ?? e) });
+        }
+      }
+
       // Solana: balance (single-user convenience). If no address is provided, use default local keypair.
       // POST /v1/solana/balance
       // Optional: includeTokens=true, tokenMint=<mint> to include token balances.
