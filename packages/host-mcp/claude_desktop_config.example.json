@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "w3rt": {
+      "command": "node",
+      "args": [
+        "/home/davirain/clawd/web3AIRuntime/packages/host-mcp/dist/mcp-server.js"
+      ],
+      "env": {
+        "W3RT_DIR": "/home/davirain/.w3rt"
+      }
+    }
+  }
+}

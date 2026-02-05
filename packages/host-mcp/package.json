@@ -1,0 +1,27 @@
+{
+  "name": "@w3rt/host-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Web3 AI Runtime",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "w3rt-mcp": "./dist/mcp-server.js"
+  },
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.json",
+    "dev": "bun run build && bun run dist/mcp-server.js",
+    "test": "echo \"No tests yet\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@solana/web3.js": "^1.98.4",
+    "@types/js-yaml": "^4.0.9",
+    "@w3rt/runtime": "workspace:*",
+    "js-yaml": "^4.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.4.5"
+  }
+}

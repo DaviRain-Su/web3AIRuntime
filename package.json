@@ -6,16 +6,16 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "sh -c 'cd packages/workflow && bun run build' && sh -c 'cd packages/policy && bun run build' && sh -c 'cd packages/trace && bun run build' && sh -c 'cd packages/chains && bun run build' && sh -c 'cd packages/adapters && bun run build' && sh -c 'cd packages/runtime && bun run build' && sh -c 'cd packages/core && bun run build' && sh -c 'cd packages/host-pi && bun run build' && sh -c 'cd packages/pi && bun run build'",
+    "build": "sh -c 'cd packages/workflow && bun run build' && sh -c 'cd packages/policy && bun run build' && sh -c 'cd packages/trace && bun run build' && sh -c 'cd packages/chains && bun run build' && sh -c 'cd packages/adapters && bun run build' && sh -c 'cd packages/runtime && bun run build' && sh -c 'cd packages/core && bun run build' && sh -c 'cd packages/host-pi && bun run build' && sh -c 'cd packages/host-mcp && bun run build' && sh -c 'cd packages/pi && bun run build'",
     "test": "bun run build && bun run --workspaces test",
     "lint": "bun run --workspaces lint",
-
     "postinstall": "node ./scripts/disable-bigint-buffer-native.cjs",
-
     "pi": "pi -e packages/host-pi/dist/pi-extension.js",
+    "mcp": "node packages/host-mcp/dist/mcp-server.js",
     "check:src": "./scripts/check-no-build-artifacts-in-src.sh"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.0",
     "typescript": "^5.4.5"
