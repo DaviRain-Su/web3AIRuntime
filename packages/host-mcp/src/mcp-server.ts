@@ -118,6 +118,8 @@ type StoredQuote = {
   outputMint: string;
   amountLamports: string;
   slippageBps: number;
+  route: string;
+  txB64: string;
   ctx: Dict;
 };
 const QUOTE_TTL_MS = 2 * 60 * 1000;
@@ -181,6 +183,10 @@ const mcpTools: Tool[] = [
         toToken: { type: "string", description: "Output token mint or symbol" },
         amount: { type: "string", description: "Amount in token units (e.g. '0.1' SOL, '25' USDC)" },
         slippageBps: { type: "number", description: "Slippage in bps (default from policy)" },
+        allowFallback: {
+          type: "boolean",
+          description: "If true, allow fallback to non-Jupiter venues (e.g., Meteora) when Jupiter is unavailable. Default false (conservative).",
+        },
       },
       required: ["fromToken", "toToken", "amount"],
     },
@@ -352,29 +358,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const decimals = inputMint === TOKEN_MINTS.SOL ? 9 : 6;
         const amountLamports = Math.floor(amtNum * Math.pow(10, decimals)).toString();
 
+        const { allowFallback = false } = (args as any) || {};
+
         const tools = getSolanaTools();
-        const quoteTool = tools.find((t) => t.name === "solana_jupiter_quote");
-        if (!quoteTool) throw new Error("solana_jupiter_quote tool not found in runtime");
+        const router = tools.find((t) => t.name === "solana_swap_exact_in");
+        if (!router) throw new Error("solana_swap_exact_in tool not found in runtime");
 
-        const ctx: Dict = {};
-        const quoteOut = await quoteTool.execute(
-          { inputMint, outputMint, amount: amountLamports, slippageBps: slip },
-          ctx
-        );
-        if (!quoteOut?.ok) throw new Error(quoteOut?.error || "Quote failed");
+        // Profile drives routing permissions in runtime
+        const ctx: Dict = {
+          __profile: {
+            // In runtime, allowedProtocols is lowercase names: jupiter / meteora
+            allowedProtocols: ["jupiter", "meteora"],
+            // If Jupiter fails, only fall back when user explicitly allows.
+            requireConfirmOnFallback: allowFallback === true,
+          },
+        };
 
-        // Store ctx + normalized params to support build+send later
+        let built: any;
+        try {
+          built = await router.execute(
+            { inputMint, outputMint, amount: amountLamports, slippageBps: slip },
+            ctx
+          );
+        } catch (e: any) {
+          // Conservative UX: if Jupiter is down, offer fallback instead of auto-switching.
+          const msg = String(e?.message ?? e);
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  `## Swap Quote Failed (Jupiter)\n\n` +
+                  `Reason: ${msg}\n\n` +
+                  `If you want to try a fallback venue (e.g., Meteora), re-run **solana_swap_quote** with \`allowFallback=true\`.\n` +
+                  `This will still require **solana_swap_execute** + confirm phrase before sending any transaction.`,
+              },
+            ],
+          };
+        }
+
+        if (!built?.ok) {
+          throw new Error(built?.error || "Swap build failed");
+        }
+
+        const route = String(built.route || "unknown");
+        const quoteId = String(ctx.quote?.quoteId || `q_${Date.now()}`);
+
+        // Store txB64 + ctx + route so execute step can simulate+send
         putQuote({
-          quoteId: quoteOut.quoteId,
+          quoteId,
           inputMint,
           outputMint,
           amountLamports,
           slippageBps: slip,
+          route,
+          txB64: String(built.txB64),
           ctx,
         });
 
         const expiresInSec = Math.round(QUOTE_TTL_MS / 1000);
         const confirmPhrase = limits.requireConfirmPhrase;
+
+        const fallbackNote =
+          route !== "jupiter"
+            ? `\n\n⚠️ Route used: **${route}** (fallback). You explicitly enabled fallback via allowFallback=true.`
+            : "";
 
         return {
           content: [
@@ -386,11 +435,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `**To:** ${toToken} (${outputMint})\n` +
                 `**Amount (smallest units):** ${amountLamports}\n` +
                 `**Slippage:** ${slip} bps\n\n` +
-                `**quoteId:** \`${quoteOut.quoteId}\` (expires in ~${expiresInSec}s)\n\n` +
+                `**quoteId:** \`${quoteId}\` (expires in ~${expiresInSec}s)\n\n` +
                 `Next: call **solana_swap_execute** with:\n` +
-                `- quoteId: \`${quoteOut.quoteId}\`\n` +
-                `- confirm: \"${confirmPhrase}\"\n\n` +
-                `Safety: execution requires explicit confirm phrase to prevent accidental/duplicate swaps.`,
+                `- quoteId: \`${quoteId}\`\n` +
+                `- confirm: \"${confirmPhrase}\"\n` +
+                fallbackNote +
+                `\n\nSafety: execution requires explicit confirm phrase to prevent accidental/duplicate swaps.`,
             },
           ],
         };
@@ -409,20 +459,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const q = getQuote(String(quoteId));
 
         const tools = getSolanaTools();
-        const buildTool = tools.find((t) => t.name === "solana_jupiter_build_tx");
         const simTool = tools.find((t) => t.name === "solana_simulate_tx");
         const sendTool = tools.find((t) => t.name === "solana_send_tx");
         const confTool = tools.find((t) => t.name === "solana_confirm_tx");
-        if (!buildTool || !simTool || !sendTool || !confTool) {
-          throw new Error("Runtime missing one of required tx tools (build/sim/send/confirm)");
+        if (!simTool || !sendTool || !confTool) {
+          throw new Error("Runtime missing one of required tx tools (simulate/send/confirm)");
         }
 
-        // Build tx from stored ctx
-        const buildOut = await buildTool.execute({ quoteId: q.quoteId }, q.ctx);
-        if (!buildOut?.ok) throw new Error(buildOut?.error || "Build tx failed");
+        const txB64 = String(q.txB64);
 
         // Simulate first (fail closed)
-        const simOut = await simTool.execute({ txB64: buildOut.txB64 }, q.ctx);
+        const simOut = await simTool.execute({ txB64 }, q.ctx);
         if (!simOut?.ok) {
           return {
             isError: true,
@@ -441,7 +488,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Send + confirm
-        const sendOut = await sendTool.execute({ txB64: buildOut.txB64 }, q.ctx);
+        const sendOut = await sendTool.execute({ txB64 }, q.ctx);
         if (!sendOut?.ok) throw new Error(sendOut?.error || "Send failed");
 
         const confOut = await confTool.execute({ signature: sendOut.signature }, q.ctx);
