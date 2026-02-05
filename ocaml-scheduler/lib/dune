@@ -1,5 +1,5 @@
 (library
  (name w3rt_scheduler)
  (public_name w3rt_scheduler)
- (libraries yojson)
+ (libraries yojson digestif)
 )

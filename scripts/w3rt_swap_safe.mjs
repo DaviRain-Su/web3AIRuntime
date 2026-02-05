@@ -102,6 +102,7 @@ function parse(argv) {
     else if (a === '--confirm') args.confirm = argv[++i];
     else if (a === '--run-id') args.runId = argv[++i];
     else if (a === '--path') args.path = argv[++i];
+    else if (a === '--plan-hash') args.planHash = argv[++i];
   }
   return { cmd, args };
 }
@@ -220,6 +221,7 @@ async function main() {
   if (cmd === 'exec') {
     const quoteId = args.quoteId;
     const confirm = args.confirm;
+    const planHash = args.planHash;
     if (!quoteId || !confirm) throw new Error('Usage: exec --quote-id <id> --confirm I_CONFIRM');
     if (String(confirm) !== String(pol.requireConfirmPhrase)) throw new Error(`Invalid confirm phrase. Must equal: ${pol.requireConfirmPhrase}`);
 
@@ -273,6 +275,7 @@ async function main() {
       },
       confirm: conf,
       policy: pol,
+      planHash: planHash || null,
     };
     writeFileSync(join(runPath, 'swap.json'), JSON.stringify(artifact, null, 2));
 

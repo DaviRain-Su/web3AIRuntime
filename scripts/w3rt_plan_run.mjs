@@ -58,15 +58,27 @@ async function main() {
   const done = new Set();
   const outputs = {};
 
-  for (const step of steps) {
+  // Execute steps in a deterministic topological order (do not trust JSON order).
+  const remaining = new Map(steps.map(s => [s.id, s]));
+
+  while (remaining.size > 0) {
+    const ready = [];
+    for (const step of remaining.values()) {
+      const deps = Array.isArray(step.dependsOn) ? step.dependsOn : [];
+      if (deps.every(d => done.has(d))) ready.push(step);
+    }
+    if (ready.length === 0) {
+      const blocked = [...remaining.values()].map(s => ({ id: s.id, dependsOn: s.dependsOn }));
+      throw new Error(`No runnable steps found (cycle or missing deps). Remaining: ${JSON.stringify(blocked, null, 2)}`);
+    }
+
+    // Deterministic choice among runnable steps
+    ready.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const step = ready[0];
+
     const id = step.id;
     const tool = step.tool;
     const params = step.params || {};
-    const deps = Array.isArray(step.dependsOn) ? step.dependsOn : [];
-
-    for (const d of deps) {
-      if (!done.has(d)) throw new Error(`Step ${id} depends on ${d} but it has not completed`);
-    }
 
     console.log(`\n==> Step ${id}: ${tool}`);
 
@@ -84,7 +96,6 @@ async function main() {
       const out = run('node', args);
       const j = JSON.parse(out);
       outputs[id] = j;
-      // expose quoteId for downstream swap_exec
       outputs.__lastQuoteId = j.quoteId;
     } else if (tool === 'w3rt_swap_exec') {
       const quoteId = params.quoteId || outputs.__lastQuoteId;
@@ -92,16 +103,20 @@ async function main() {
       const confirm = params.confirm;
       if (!confirm) throw new Error('swap_exec missing confirm');
 
+      const planHash = p?.meta?.planHash;
+
       if (dryRun) {
         outputs[id] = {
           ok: true,
           dryRun: true,
           wouldExec: true,
           quoteId,
+          planHash: planHash || null,
           note: 'dry-run mode: swap execution skipped',
         };
       } else {
         const args = ['scripts/w3rt_swap_safe.mjs', 'exec', '--quote-id', String(quoteId), '--confirm', String(confirm)];
+        if (planHash) args.push('--plan-hash', String(planHash));
         const out = run('node', args);
         outputs[id] = JSON.parse(out);
       }
@@ -110,6 +125,7 @@ async function main() {
     }
 
     done.add(id);
+    remaining.delete(id);
   }
 
   const result = { ok: true, workflow: p.workflow, dryRun, outputs };

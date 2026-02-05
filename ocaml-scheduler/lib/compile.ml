@@ -5,6 +5,41 @@ module SSet = Set.Make (String)
 let action_to_step (a : action) : plan_step =
   { id = a.id; tool = a.tool; params = a.params; depends_on = a.depends_on }
 
+let rec canonical_json (j : Yojson.Safe.t) : Yojson.Safe.t =
+  match j with
+  | `Assoc kvs ->
+      let kvs' =
+        kvs
+        |> List.map (fun (k, v) -> (k, canonical_json v))
+        |> List.sort (fun (a, _) (b, _) -> String.compare a b)
+      in
+      `Assoc kvs'
+  | `List xs -> `List (List.map canonical_json xs)
+  | (`Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _) as x -> x
+
+let sha256_hex (s : string) : string = Digestif.SHA256.(to_hex (digest_string s))
+
+let step_to_json (s : plan_step) : Yojson.Safe.t =
+  `Assoc
+    [
+      ("id", `String s.id);
+      ("tool", `String s.tool);
+      ("params", canonical_json s.params);
+      ("dependsOn", `List (List.map (fun d -> `String d) (List.sort String.compare s.depends_on)));
+    ]
+
+let plan_to_canonical_json (p : plan) : Yojson.Safe.t =
+  `Assoc
+    [
+      ("schema", `String p.schema);
+      ("workflow", `String p.workflow);
+      ("steps", `List (List.map step_to_json p.steps));
+    ]
+
+let plan_hash (p : plan) : string =
+  let canon = plan_to_canonical_json p |> Yojson.Safe.to_string in
+  "sha256:" ^ sha256_hex canon
+
 let hard_insert_balance_steps (_wf : workflow) (steps : plan_step list) : plan_step list =
   (* Hard policy: if there's any swap_exec, ensure balance_before and balance_after exist in the PLAN.
      We do NOT remove user-defined steps; we only add missing steps and patch deps.
@@ -58,21 +93,23 @@ let hard_insert_balance_steps (_wf : workflow) (steps : plan_step list) : plan_s
 let to_plan (wf : workflow) : plan =
   let base_steps = wf.actions |> List.map action_to_step in
   let steps = hard_insert_balance_steps wf base_steps in
+  (* Keep step order deterministic *)
+  let steps = List.sort (fun (a : plan_step) (b : plan_step) -> String.compare a.id b.id) steps in
   { schema = "w3rt.plan.v1"; workflow = wf.name; steps }
 
 let plan_to_json (p : plan) : Yojson.Safe.t =
-  let step_to_json (s : plan_step) =
-    `Assoc
-      [
-        ("id", `String s.id);
-        ("tool", `String s.tool);
-        ("params", s.params);
-        ("dependsOn", `List (List.map (fun d -> `String d) s.depends_on));
-      ]
-  in
-  `Assoc
-    [
-      ("schema", `String p.schema);
-      ("workflow", `String p.workflow);
-      ("steps", `List (List.map step_to_json p.steps));
-    ]
+  let core = plan_to_canonical_json p in
+  match core with
+  | `Assoc kvs ->
+      `Assoc
+        (kvs
+        @ [
+            ( "meta",
+              `Assoc
+                [
+                  ("planHash", `String (plan_hash p));
+                  ("hashAlg", `String "sha256");
+                  ("canonical", `Bool true);
+                ] );
+          ])
+  | _ -> core

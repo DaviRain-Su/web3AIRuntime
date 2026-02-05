@@ -94,6 +94,75 @@ let compile_cmd =
   let term = Term.(ret (const cmd_compile $ input_arg $ out_opt)) in
   Cmd.v (Cmd.info "compile" ~doc) term
 
+let cmd_verify plan_path artifact_path =
+  let open Yojson.Safe in
+  try
+    let plan_json = from_file plan_path in
+    let artifact_json = from_file artifact_path in
+
+    let get_string path j =
+      match Util.member path j with
+      | `String s -> Some s
+      | _ -> None
+    in
+
+    let p_schema = Util.member "schema" plan_json in
+    let p_workflow = Util.member "workflow" plan_json in
+    let p_steps = Util.member "steps" plan_json in
+
+    (* Reconstruct a plan record to compute hash in the same way as compile. *)
+    let steps =
+      match p_steps with
+      | `List xs ->
+          xs
+          |> List.filter_map (fun sj ->
+                 let id = Util.member "id" sj |> Util.to_string_option in
+                 let tool = Util.member "tool" sj |> Util.to_string_option in
+                 match (id, tool) with
+                 | Some id, Some tool ->
+                     let params = Util.member "params" sj in
+                     let depends_on =
+                       match Util.member "dependsOn" sj with
+                       | `List ds -> ds |> List.filter_map Util.to_string_option
+                       | _ -> []
+                     in
+                     Some ({ W3rt_scheduler.Types.id; tool; params; depends_on } : W3rt_scheduler.Types.plan_step)
+                 | _ -> None)
+      | _ -> []
+    in
+
+    let schema = match p_schema with `String s -> s | _ -> "" in
+    let workflow = match p_workflow with `String s -> s | _ -> "" in
+
+    let plan : W3rt_scheduler.Types.plan = { schema; workflow; steps } in
+    let computed = W3rt_scheduler.Compile.plan_hash plan in
+
+    let declared = get_string "planHash" (Util.member "meta" plan_json) in
+    let artifact_hash = get_string "planHash" artifact_json in
+
+    let ok_declared = match declared with Some d -> String.equal d computed | None -> false in
+    let ok_artifact = match artifact_hash with Some d -> String.equal d computed | None -> false in
+
+    if ok_declared && ok_artifact then (
+      Printf.printf "OK: planHash matches (computed=%s)\n" computed;
+      `Ok ())
+    else (
+      Printf.printf "FAIL: planHash mismatch\n";
+      Printf.printf "computed: %s\n" computed;
+      (match declared with Some d -> Printf.printf "plan.meta.planHash: %s\n" d | None -> Printf.printf "plan.meta.planHash: (missing)\n");
+      (match artifact_hash with Some d -> Printf.printf "artifact.planHash: %s\n" d | None -> Printf.printf "artifact.planHash: (missing)\n");
+      `Error (false, "planHash mismatch"))
+  with e -> `Error (false, Printexc.to_string e)
+
+let artifact_arg =
+  let doc = "Input artifact JSON path (swap.json)" in
+  Arg.(required & pos 1 (some string) None & info [] ~docv:"ARTIFACT.json" ~doc)
+
+let verify_cmd =
+  let doc = "Verify an artifact matches the plan hash" in
+  let term = Term.(ret (const cmd_verify $ input_arg $ artifact_arg)) in
+  Cmd.v (Cmd.info "verify" ~doc) term
+
 let explain_cmd =
   let doc = "Explain workflow JSON in human-readable form" in
   let term = Term.(ret (const cmd_explain $ input_arg)) in
@@ -101,6 +170,6 @@ let explain_cmd =
 
 let default_cmd =
   let doc = "w3rt scheduler compiler" in
-  Cmd.group (Cmd.info "w3rt-scheduler" ~version:"0.1.0" ~doc) [ validate_cmd; explain_cmd; compile_cmd ]
+  Cmd.group (Cmd.info "w3rt-scheduler" ~version:"0.1.0" ~doc) [ validate_cmd; explain_cmd; compile_cmd; verify_cmd ]
 
 let () = exit (Cmd.eval default_cmd)
