@@ -78,6 +78,21 @@ function writeQuoteStore(obj) {
   writeFileSync(QUOTE_STORE, JSON.stringify(obj, null, 2));
 }
 
+function canonicalize(x) {
+  if (x === null || x === undefined) return x;
+  if (Array.isArray(x)) return x.map(canonicalize);
+  if (typeof x === 'object') {
+    const out = {};
+    for (const k of Object.keys(x).sort()) out[k] = canonicalize(x[k]);
+    return out;
+  }
+  return x;
+}
+
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(s).digest('hex');
+}
+
 function policy(cfg) {
   const p = cfg?.policy || {};
   return {
@@ -86,6 +101,11 @@ function policy(cfg) {
     maxSwapInputUsdc: typeof p.maxSwapInputUsdc === 'number' ? p.maxSwapInputUsdc : 250,
     requireConfirmPhrase: p.requireConfirmPhrase || 'I_CONFIRM',
   };
+}
+
+function policyHash(pol) {
+  const canon = JSON.stringify(canonicalize(pol));
+  return `sha256:${sha256Hex(canon)}`;
 }
 
 function parse(argv) {
@@ -275,6 +295,7 @@ async function main() {
       },
       confirm: conf,
       policy: pol,
+      policyHash: policyHash(pol),
       planHash: planHash || null,
     };
     writeFileSync(join(runPath, 'swap.json'), JSON.stringify(artifact, null, 2));

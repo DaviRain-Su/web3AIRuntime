@@ -18,12 +18,33 @@ let cmd_validate input =
       `Ok ()
   | Error e -> `Error (false, e)
 
-let cmd_compile input out_path =
+let merge_meta (plan_json : Yojson.Safe.t) (extra : (string * Yojson.Safe.t) list) : Yojson.Safe.t =
+  match plan_json with
+  | `Assoc kvs ->
+      let meta0 = List.assoc_opt "meta" kvs |> Option.value ~default:(`Assoc []) in
+      let meta1 =
+        match meta0 with
+        | `Assoc mkvs -> `Assoc (mkvs @ extra)
+        | _ -> `Assoc extra
+      in
+      `Assoc ((List.remove_assoc "meta" kvs) @ [ ("meta", meta1) ])
+  | _ -> plan_json
+
+let cmd_compile input out_path policy_path =
   let wf = W3rt_scheduler.Parser.from_file input in
   match W3rt_scheduler.Dag.validate wf with
   | Error e -> `Error (false, e)
   | Ok () ->
       let plan = W3rt_scheduler.Compile.to_plan wf |> W3rt_scheduler.Compile.plan_to_json in
+      let plan =
+        match policy_path with
+        | None -> plan
+        | Some p ->
+            let policy_json = Yojson.Safe.from_file p in
+            let canon = W3rt_scheduler.Compile.canonical_json policy_json |> Yojson.Safe.to_string in
+            let ph = "sha256:" ^ W3rt_scheduler.Compile.sha256_hex canon in
+            merge_meta plan [ ("policyHash", `String ph); ("policy", policy_json) ]
+      in
       let s = Yojson.Safe.pretty_to_string plan in
       (match out_path with
       | None -> print_endline s
@@ -84,6 +105,10 @@ let out_opt =
   let doc = "Write plan JSON to file instead of stdout" in
   Arg.(value & opt (some string) None & info [ "out" ] ~docv:"PLAN.json" ~doc)
 
+let policy_opt =
+  let doc = "Attach a policy JSON file into plan meta (and include policyHash)" in
+  Arg.(value & opt (some string) None & info [ "policy" ] ~docv:"POLICY.json" ~doc)
+
 let validate_cmd =
   let doc = "Validate workflow JSON (ids, deps, cycles)" in
   let term = Term.(ret (const cmd_validate $ input_arg)) in
@@ -91,24 +116,23 @@ let validate_cmd =
 
 let compile_cmd =
   let doc = "Compile workflow JSON into w3rt.plan.v1 JSON" in
-  let term = Term.(ret (const cmd_compile $ input_arg $ out_opt)) in
+  let term = Term.(ret (const cmd_compile $ input_arg $ out_opt $ policy_opt)) in
   Cmd.v (Cmd.info "compile" ~doc) term
 
 let cmd_verify plan_path artifact_path =
-  let open Yojson.Safe in
   try
-    let plan_json = from_file plan_path in
-    let artifact_json = from_file artifact_path in
+    let plan_json = Yojson.Safe.from_file plan_path in
+    let artifact_json = Yojson.Safe.from_file artifact_path in
 
     let get_string path j =
-      match Util.member path j with
+      match Yojson.Safe.Util.member path j with
       | `String s -> Some s
       | _ -> None
     in
 
-    let p_schema = Util.member "schema" plan_json in
-    let p_workflow = Util.member "workflow" plan_json in
-    let p_steps = Util.member "steps" plan_json in
+    let p_schema = Yojson.Safe.Util.member "schema" plan_json in
+    let p_workflow = Yojson.Safe.Util.member "workflow" plan_json in
+    let p_steps = Yojson.Safe.Util.member "steps" plan_json in
 
     (* Reconstruct a plan record to compute hash in the same way as compile. *)
     let steps =
@@ -116,14 +140,14 @@ let cmd_verify plan_path artifact_path =
       | `List xs ->
           xs
           |> List.filter_map (fun sj ->
-                 let id = Util.member "id" sj |> Util.to_string_option in
-                 let tool = Util.member "tool" sj |> Util.to_string_option in
+                 let id = Yojson.Safe.Util.member "id" sj |> Yojson.Safe.Util.to_string_option in
+                 let tool = Yojson.Safe.Util.member "tool" sj |> Yojson.Safe.Util.to_string_option in
                  match (id, tool) with
                  | Some id, Some tool ->
-                     let params = Util.member "params" sj in
+                     let params = Yojson.Safe.Util.member "params" sj in
                      let depends_on =
-                       match Util.member "dependsOn" sj with
-                       | `List ds -> ds |> List.filter_map Util.to_string_option
+                       match Yojson.Safe.Util.member "dependsOn" sj with
+                       | `List ds -> ds |> List.filter_map Yojson.Safe.Util.to_string_option
                        | _ -> []
                      in
                      Some ({ W3rt_scheduler.Types.id; tool; params; depends_on } : W3rt_scheduler.Types.plan_step)
@@ -137,21 +161,34 @@ let cmd_verify plan_path artifact_path =
     let plan : W3rt_scheduler.Types.plan = { schema; workflow; steps } in
     let computed = W3rt_scheduler.Compile.plan_hash plan in
 
-    let declared = get_string "planHash" (Util.member "meta" plan_json) in
+    let declared = get_string "planHash" (Yojson.Safe.Util.member "meta" plan_json) in
     let artifact_hash = get_string "planHash" artifact_json in
+
+    let p_policy_hash = get_string "policyHash" (Yojson.Safe.Util.member "meta" plan_json) in
+    let a_policy_hash = get_string "policyHash" artifact_json in
 
     let ok_declared = match declared with Some d -> String.equal d computed | None -> false in
     let ok_artifact = match artifact_hash with Some d -> String.equal d computed | None -> false in
 
-    if ok_declared && ok_artifact then (
+    let ok_policy =
+      match (p_policy_hash, a_policy_hash) with
+      | None, None -> true
+      | Some p, Some a -> String.equal p a
+      | _ -> false
+    in
+
+    if ok_declared && ok_artifact && ok_policy then (
       Printf.printf "OK: planHash matches (computed=%s)\n" computed;
+      (match p_policy_hash with Some ph -> Printf.printf "OK: policyHash matches (%s)\n" ph | None -> ());
       `Ok ())
     else (
-      Printf.printf "FAIL: planHash mismatch\n";
-      Printf.printf "computed: %s\n" computed;
+      Printf.printf "FAIL: verification mismatch\n";
+      Printf.printf "computed planHash: %s\n" computed;
       (match declared with Some d -> Printf.printf "plan.meta.planHash: %s\n" d | None -> Printf.printf "plan.meta.planHash: (missing)\n");
       (match artifact_hash with Some d -> Printf.printf "artifact.planHash: %s\n" d | None -> Printf.printf "artifact.planHash: (missing)\n");
-      `Error (false, "planHash mismatch"))
+      (match p_policy_hash with Some d -> Printf.printf "plan.meta.policyHash: %s\n" d | None -> ());
+      (match a_policy_hash with Some d -> Printf.printf "artifact.policyHash: %s\n" d | None -> ());
+      `Error (false, "verification mismatch"))
   with e -> `Error (false, Printexc.to_string e)
 
 let artifact_arg =

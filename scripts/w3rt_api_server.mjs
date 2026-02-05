@@ -21,6 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
+import yaml from 'js-yaml';
 
 const HOST = process.env.W3RT_API_HOST || '127.0.0.1';
 const PORT = Number(process.env.W3RT_API_PORT || 8787);
@@ -75,6 +76,17 @@ function ocamlEnvPrefix() {
   return 'export PATH="$HOME/.local/bin:$PATH"; eval "$(opam env --switch=w3rt-ocaml --set-switch)";';
 }
 
+function loadPolicySnapshot() {
+  try {
+    const cfgPath = join(w3rtDir(), 'config.yaml');
+    if (!existsSync(cfgPath)) return null;
+    const cfg = yaml.load(readFileSync(cfgPath, 'utf-8')) || {};
+    return cfg.policy || null;
+  } catch {
+    return null;
+  }
+}
+
 function compileWorkflow(workflowObj) {
   const tmp = ensureTmp();
   const wfPath = join(tmp, `wf_${Date.now()}.json`);
@@ -90,8 +102,16 @@ function compileWorkflow(workflowObj) {
   }
   const explain = (r.stdout || '').trim();
 
-  // compile
-  r = sh(`${prefix} cd /home/davirain/clawd/web3AIRuntime/ocaml-scheduler && opam exec -- dune exec -- w3rt-scheduler compile ${JSON.stringify(wfPath)} --out ${JSON.stringify(planPath)}`);
+  // compile (+ attach policy snapshot if present)
+  const policy = loadPolicySnapshot();
+  let policyArg = '';
+  if (policy) {
+    const policyPath = join(tmp, `policy_${Date.now()}.json`);
+    writeFileSync(policyPath, JSON.stringify(policy, null, 2));
+    policyArg = ` --policy ${JSON.stringify(policyPath)}`;
+  }
+
+  r = sh(`${prefix} cd /home/davirain/clawd/web3AIRuntime/ocaml-scheduler && opam exec -- dune exec -- w3rt-scheduler compile ${JSON.stringify(wfPath)} --out ${JSON.stringify(planPath)}${policyArg}`);
   if (r.status !== 0) {
     throw new Error((r.stderr || r.stdout || '').trim().slice(0, 5000));
   }

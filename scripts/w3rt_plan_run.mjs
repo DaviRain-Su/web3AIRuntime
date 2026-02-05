@@ -16,9 +16,11 @@
  * - Swap exec requires explicit confirm in plan params (e.g. I_CONFIRM).
  */
 
-import { readFileSync, mkdirSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
+import yaml from 'js-yaml';
 import { spawnSync } from 'node:child_process';
 
 function parseArgs(argv) {
@@ -59,9 +61,35 @@ function safeId(s) {
   return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
 }
 
-function writeJson(path, obj) {
-  mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, JSON.stringify(obj, null, 2));
+function canonicalize(x) {
+  if (x === null || x === undefined) return x;
+  if (Array.isArray(x)) return x.map(canonicalize);
+  if (typeof x === 'object') {
+    const out = {};
+    for (const k of Object.keys(x).sort()) out[k] = canonicalize(x[k]);
+    return out;
+  }
+  return x;
+}
+
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(s).digest('hex');
+}
+
+function loadPolicySnapshot() {
+  try {
+    const cfgPath = join(w3rtDir(), 'config.yaml');
+    const cfg = yaml.load(readFileSync(cfgPath, 'utf-8')) || {};
+    return cfg.policy || null;
+  } catch {
+    return null;
+  }
+}
+
+function policyHash(pol) {
+  if (!pol) return null;
+  const canon = JSON.stringify(canonicalize(pol));
+  return `sha256:${sha256Hex(canon)}`;
 }
 
 async function main() {
@@ -89,6 +117,9 @@ async function main() {
   // Persist the plan used for this run.
   writeFileSync(join(runPath, 'plan.json'), raw);
 
+  const policy = loadPolicySnapshot();
+  const policyHashVal = policyHash(policy);
+
   const runMeta = {
     schema: 'w3rt.run.v1',
     runId,
@@ -96,6 +127,8 @@ async function main() {
     workflow: p.workflow,
     dryRun,
     planHash,
+    policy: policy || null,
+    policyHash: policyHashVal,
     steps: [],
   };
 
