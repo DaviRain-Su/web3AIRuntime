@@ -16,7 +16,9 @@
  * - Swap exec requires explicit confirm in plan params (e.g. I_CONFIRM).
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { join } from 'node:path';
+import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 function parseArgs(argv) {
@@ -43,6 +45,25 @@ function jsonOrText(s) {
   try { return JSON.parse(s); } catch { return s; }
 }
 
+function w3rtDir() {
+  return process.env.W3RT_DIR || join(os.homedir(), '.w3rt');
+}
+
+function runsDir() {
+  const d = join(w3rtDir(), 'runs');
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+function safeId(s) {
+  return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+}
+
+function writeJson(path, obj) {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, JSON.stringify(obj, null, 2));
+}
+
 async function main() {
   const { plan, dryRun, summary } = parseArgs(process.argv.slice(2));
   if (!plan) {
@@ -57,6 +78,26 @@ async function main() {
   const steps = Array.isArray(p.steps) ? p.steps : [];
   const done = new Set();
   const outputs = {};
+
+  // Run artifact folder (chain-of-custody for the whole plan execution)
+  const planHash = p?.meta?.planHash || null;
+  const runId = `plan_${Date.now()}_${safeId((planHash || 'nohash').slice(0, 18))}`;
+  const runPath = join(runsDir(), runId);
+  const stepsPath = join(runPath, 'steps');
+  mkdirSync(stepsPath, { recursive: true });
+
+  // Persist the plan used for this run.
+  writeFileSync(join(runPath, 'plan.json'), raw);
+
+  const runMeta = {
+    schema: 'w3rt.run.v1',
+    runId,
+    createdAt: new Date().toISOString(),
+    workflow: p.workflow,
+    dryRun,
+    planHash,
+    steps: [],
+  };
 
   // Execute steps in a deterministic topological order (do not trust JSON order).
   const remaining = new Map(steps.map(s => [s.id, s]));
@@ -81,6 +122,8 @@ async function main() {
     const params = step.params || {};
 
     console.log(`\n==> Step ${id}: ${tool}`);
+
+    const startedAt = new Date().toISOString();
 
     if (tool === 'w3rt_balance') {
       const args = ['scripts/w3rt_balance.mjs'];
@@ -124,16 +167,38 @@ async function main() {
       throw new Error(`Unsupported tool: ${tool}`);
     }
 
+    const finishedAt = new Date().toISOString();
+
+    // write per-step artifact
+    const stepArtifact = {
+      schema: 'w3rt.step.v1',
+      runId,
+      stepId: id,
+      tool,
+      dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn : [],
+      startedAt,
+      finishedAt,
+      output: outputs[id],
+    };
+    writeFileSync(join(stepsPath, `${safeId(id)}.json`), JSON.stringify(stepArtifact, null, 2));
+
+    runMeta.steps.push({ id, tool, artifact: `steps/${safeId(id)}.json` });
+
     done.add(id);
     remaining.delete(id);
   }
 
-  const result = { ok: true, workflow: p.workflow, dryRun, outputs };
+  runMeta.finishedAt = new Date().toISOString();
+  writeFileSync(join(runPath, 'run.json'), JSON.stringify(runMeta, null, 2));
+
+  const result = { ok: true, workflow: p.workflow, dryRun, runId, runPath, planHash, outputs };
 
   if (summary) {
     const lines = [];
     lines.push(`## Plan completed${dryRun ? ' (dry-run)' : ''}`);
     lines.push(`workflow: ${p.workflow}`);
+    lines.push(`runId: ${runId}`);
+    if (planHash) lines.push(`planHash: ${planHash}`);
 
     for (const step of steps) {
       const o = outputs[step.id];
@@ -144,7 +209,7 @@ async function main() {
         lines.push(`- ${step.id}: quoteId ${o.quoteId} route=${o.route}`);
       } else if (step.tool === 'w3rt_swap_exec' && o.ok) {
         if (o.dryRun) lines.push(`- ${step.id}: (skipped) would exec quoteId=${o.quoteId}`);
-        else lines.push(`- ${step.id}: signature ${o.signature} runId=${o.runId}`);
+        else lines.push(`- ${step.id}: signature ${o.signature} swapRunId=${o.runId}`);
       } else {
         lines.push(`- ${step.id}: done`);
       }

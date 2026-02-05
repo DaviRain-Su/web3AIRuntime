@@ -112,12 +112,23 @@ function runPlan(planObj, { dryRun }) {
     throw new Error((r.stderr || r.stdout || '').trim().slice(0, 5000));
   }
   const summary = (r.stdout || '').trim();
-  return { summary };
+
+  // extract runId from summary lines: "runId: <id>"
+  const m = summary.match(/\brunId:\s*(\S+)/);
+  const runId = m ? m[1] : null;
+
+  return { summary, runId };
 }
 
 function getArtifact(runId) {
   const p = join(w3rtDir(), 'runs', runId, 'swap.json');
   if (!existsSync(p)) throw new Error(`artifact not found: ${p}`);
+  return JSON.parse(readFileSync(p, 'utf-8'));
+}
+
+function getRun(runId) {
+  const p = join(w3rtDir(), 'runs', runId, 'run.json');
+  if (!existsSync(p)) throw new Error(`run not found: ${p}`);
   return JSON.parse(readFileSync(p, 'utf-8'));
 }
 
@@ -158,6 +169,13 @@ const server = http.createServer(async (req, res) => {
       const runId = decodeURIComponent(m[1]);
       const artifact = getArtifact(runId);
       return json(res, 200, { ok: true, artifact });
+    }
+
+    const m2 = url.pathname.match(/^\/run\/(.+)$/);
+    if (req.method === 'GET' && m2) {
+      const runId = decodeURIComponent(m2[1]);
+      const runObj = getRun(runId);
+      return json(res, 200, { ok: true, run: runObj });
     }
 
     return text(res, 404, 'not found');
