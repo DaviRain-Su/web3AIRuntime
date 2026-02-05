@@ -1,0 +1,19 @@
+opam-version: "2.0"
+name: "w3rt_scheduler"
+version: "0.1.0"
+synopsis: "w3rt scheduler/plan compiler (JSON in -> JSON plan out)"
+description: "A minimal OCaml CLI that validates and compiles workflow JSON into an execution plan for OpenClaw/w3rt."
+maintainer: ""
+authors: ["DaviRain"]
+license: "MIT"
+homepage: "https://github.com/DaviRain-Su/web3AIRuntime"
+bug-reports: "https://github.com/DaviRain-Su/web3AIRuntime/issues"
+depends: [
+  "ocaml" {>= "4.14.0"}
+  "dune" {>= "3.10"}
+  "yojson" {>= "2.1.0"}
+  "cmdliner" {>= "1.2.0"}
+]
+build: [
+  ["dune" "build" "-p" name "-j" jobs]
+]

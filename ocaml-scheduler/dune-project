@@ -1,0 +1,3 @@
+(lang dune 3.10)
+(name w3rt_scheduler)
+(generate_opam_files false)

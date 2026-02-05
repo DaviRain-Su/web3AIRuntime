@@ -1,0 +1,29 @@
+{
+  "name": "swap-safe-demo",
+  "actions": [
+    {
+      "id": "balance_before",
+      "tool": "w3rt_balance",
+      "params": {"includeTokens": false},
+      "dependsOn": []
+    },
+    {
+      "id": "swap_quote",
+      "tool": "w3rt_swap_quote",
+      "params": {"from": "SOL", "to": "USDC", "amount": "0.01", "slippageBps": 50, "allowFallback": true},
+      "dependsOn": ["balance_before"]
+    },
+    {
+      "id": "swap_exec",
+      "tool": "w3rt_swap_exec",
+      "params": {"confirm": "I_CONFIRM"},
+      "dependsOn": ["swap_quote"]
+    },
+    {
+      "id": "balance_after",
+      "tool": "w3rt_balance",
+      "params": {"includeTokens": false},
+      "dependsOn": ["swap_exec"]
+    }
+  ]
+}
