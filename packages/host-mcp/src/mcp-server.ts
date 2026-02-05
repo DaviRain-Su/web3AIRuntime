@@ -175,7 +175,7 @@ const mcpTools: Tool[] = [
   // Swap (two-step)
   {
     name: "solana_swap_quote",
-    description: "Step 1/2: Request a Jupiter swap quote and create a short-lived quoteId (then use solana_swap_execute).",
+    description: "Step 1/2: Build a swap transaction. Tries Jupiter first, then can fall back to Meteora (when allowFallback=true). Returns a short-lived quoteId for execution.",
     inputSchema: {
       type: "object",
       properties: {
@@ -358,7 +358,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const decimals = inputMint === TOKEN_MINTS.SOL ? 9 : 6;
         const amountLamports = Math.floor(amtNum * Math.pow(10, decimals)).toString();
 
-        const { allowFallback = false } = (args as any) || {};
+        const { allowFallback = true } = (args as any) || {};
 
         const tools = getSolanaTools();
         const router = tools.find((t) => t.name === "solana_swap_exact_in");
@@ -369,34 +369,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           __profile: {
             // In runtime, allowedProtocols is lowercase names: jupiter / meteora
             allowedProtocols: ["jupiter", "meteora"],
-            // If Jupiter fails, only fall back when user explicitly allows.
+            // Auto fallback when Jupiter fails (still requires 2-step execute confirm)
             requireConfirmOnFallback: allowFallback === true,
           },
         };
 
-        let built: any;
-        try {
-          built = await router.execute(
-            { inputMint, outputMint, amount: amountLamports, slippageBps: slip },
-            ctx
-          );
-        } catch (e: any) {
-          // Conservative UX: if Jupiter is down, offer fallback instead of auto-switching.
-          const msg = String(e?.message ?? e);
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text:
-                  `## Swap Quote Failed (Jupiter)\n\n` +
-                  `Reason: ${msg}\n\n` +
-                  `If you want to try a fallback venue (e.g., Meteora), re-run **solana_swap_quote** with \`allowFallback=true\`.\n` +
-                  `This will still require **solana_swap_execute** + confirm phrase before sending any transaction.`,
-              },
-            ],
-          };
-        }
+        // Automatic mode: router will try Jupiter first, then fallback to Meteora if allowed.
+        const built = await router.execute(
+          { inputMint, outputMint, amount: amountLamports, slippageBps: slip },
+          ctx
+        );
 
         if (!built?.ok) {
           throw new Error(built?.error || "Swap build failed");
