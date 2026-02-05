@@ -35,14 +35,45 @@ let cmd_explain input =
   match W3rt_scheduler.Dag.validate wf with
   | Error e -> `Error (false, e)
   | Ok () ->
-      Printf.printf "Workflow: %s\nActions: %d\n\n" wf.name (List.length wf.actions);
+      let open W3rt_scheduler.Types in
+      Printf.printf "Workflow: %s\n" wf.name;
+      Printf.printf "Source actions: %d\n\n" (List.length wf.actions);
+
+      Printf.printf "[Source]\n";
       wf.actions
-      |> List.iter (fun (a : W3rt_scheduler.Types.action) ->
+      |> List.iter (fun (a : action) ->
              Printf.printf "- %s: %s" a.id a.tool;
              (match a.depends_on with
              | [] -> ()
              | ds -> Printf.printf "  (dependsOn: %s)" (String.concat "," ds));
              print_newline ());
+
+      let plan = W3rt_scheduler.Compile.to_plan wf in
+      let module SSet = Set.Make (String) in
+      let src_ids =
+        wf.actions
+        |> List.fold_left (fun acc (a : action) -> SSet.add a.id acc) SSet.empty
+      in
+      let injected =
+        plan.steps
+        |> List.filter (fun (s : plan_step) -> not (SSet.mem s.id src_ids))
+      in
+
+      Printf.printf "\n[Compiled plan]\n";
+      plan.steps
+      |> List.iter (fun (s : plan_step) ->
+             let tag = if SSet.mem s.id src_ids then "" else " (injected)" in
+             Printf.printf "- %s: %s%s" s.id s.tool tag;
+             (match s.depends_on with
+             | [] -> ()
+             | ds -> Printf.printf "  (dependsOn: %s)" (String.concat "," ds));
+             print_newline ());
+
+      (match injected with
+      | [] -> ()
+      | xs ->
+          Printf.printf "\nInjected safety steps: %d\n" (List.length xs));
+
       `Ok ()
 
 let input_arg =
