@@ -1,0 +1,17 @@
+{
+  "name": "min-swap",
+  "actions": [
+    {
+      "id": "swap_quote",
+      "tool": "w3rt_swap_quote",
+      "params": {"from": "SOL", "to": "USDC", "amount": "0.01", "slippageBps": 50, "allowFallback": true},
+      "dependsOn": []
+    },
+    {
+      "id": "swap_exec",
+      "tool": "w3rt_swap_exec",
+      "params": {"confirm": "I_CONFIRM"},
+      "dependsOn": ["swap_quote"]
+    }
+  ]
+}

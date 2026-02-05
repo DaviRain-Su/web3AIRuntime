@@ -77,3 +77,14 @@ cat /tmp/plan.json
 - Add policy compilation (limits, allowlists)
 - Add deterministic hashing of plan artifacts
 - Add OpenClaw skill that calls `w3rt-scheduler compile` then runs each step
+
+## Safety features (compile-time)
+
+The compiler enforces and/or injects safety structure:
+
+- Any `w3rt_swap_exec` action **must** depend on a `w3rt_swap_quote` action.
+- Any `w3rt_swap_exec` action **must** include `params.confirm = "I_CONFIRM"`.
+- If a workflow contains any swap execution, the compiler **ensures** the plan includes:
+  - `balance_before` (w3rt_balance)
+  - `balance_after` (w3rt_balance)
+  and patches dependencies so `swap_quote` depends on `balance_before` and `balance_after` depends on all swap exec steps.
