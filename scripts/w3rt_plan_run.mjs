@@ -20,9 +20,12 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 function parseArgs(argv) {
-  const out = { plan: null };
+  const out = { plan: null, dryRun: false, summary: false };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--plan') out.plan = argv[++i];
+    const a = argv[i];
+    if (a === '--plan') out.plan = argv[++i];
+    else if (a === '--dry-run') out.dryRun = true;
+    else if (a === '--summary') out.summary = true;
   }
   return out;
 }
@@ -41,9 +44,9 @@ function jsonOrText(s) {
 }
 
 async function main() {
-  const { plan } = parseArgs(process.argv.slice(2));
+  const { plan, dryRun, summary } = parseArgs(process.argv.slice(2));
   if (!plan) {
-    console.log('Usage: node scripts/w3rt_plan_run.mjs --plan /path/to/plan.json');
+    console.log('Usage: node scripts/w3rt_plan_run.mjs --plan /path/to/plan.json [--dry-run] [--summary]');
     process.exit(1);
   }
 
@@ -88,9 +91,20 @@ async function main() {
       if (!quoteId) throw new Error('swap_exec missing quoteId (and no previous swap_quote output found)');
       const confirm = params.confirm;
       if (!confirm) throw new Error('swap_exec missing confirm');
-      const args = ['scripts/w3rt_swap_safe.mjs', 'exec', '--quote-id', String(quoteId), '--confirm', String(confirm)];
-      const out = run('node', args);
-      outputs[id] = JSON.parse(out);
+
+      if (dryRun) {
+        outputs[id] = {
+          ok: true,
+          dryRun: true,
+          wouldExec: true,
+          quoteId,
+          note: 'dry-run mode: swap execution skipped',
+        };
+      } else {
+        const args = ['scripts/w3rt_swap_safe.mjs', 'exec', '--quote-id', String(quoteId), '--confirm', String(confirm)];
+        const out = run('node', args);
+        outputs[id] = JSON.parse(out);
+      }
     } else {
       throw new Error(`Unsupported tool: ${tool}`);
     }
@@ -98,8 +112,33 @@ async function main() {
     done.add(id);
   }
 
-  console.log('\n=== Plan completed ===');
-  console.log(JSON.stringify({ ok: true, workflow: p.workflow, outputs }, null, 2));
+  const result = { ok: true, workflow: p.workflow, dryRun, outputs };
+
+  if (summary) {
+    const lines = [];
+    lines.push(`## Plan completed${dryRun ? ' (dry-run)' : ''}`);
+    lines.push(`workflow: ${p.workflow}`);
+
+    for (const step of steps) {
+      const o = outputs[step.id];
+      if (!o) continue;
+      if (step.tool === 'w3rt_balance' && o.ok && o.sol) {
+        lines.push(`- ${step.id}: balance ${Number(o.sol.sol).toFixed(4)} SOL`);
+      } else if (step.tool === 'w3rt_swap_quote' && o.ok) {
+        lines.push(`- ${step.id}: quoteId ${o.quoteId} route=${o.route}`);
+      } else if (step.tool === 'w3rt_swap_exec' && o.ok) {
+        if (o.dryRun) lines.push(`- ${step.id}: (skipped) would exec quoteId=${o.quoteId}`);
+        else lines.push(`- ${step.id}: signature ${o.signature} runId=${o.runId}`);
+      } else {
+        lines.push(`- ${step.id}: done`);
+      }
+    }
+
+    console.log(lines.join('\n'));
+  } else {
+    console.log('\n=== Plan completed ===');
+    console.log(JSON.stringify(result, null, 2));
+  }
 }
 
 main().catch((e) => {

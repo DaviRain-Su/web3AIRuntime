@@ -4,3 +4,4 @@ dist/
 .w3rt/runs/
 .DS_Store
 .env
+ocaml-scheduler/_build/
