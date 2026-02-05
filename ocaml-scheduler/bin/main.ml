@@ -1,12 +1,5 @@
 open Cmdliner
 
-let read_file path =
-  let ic = open_in path in
-  let len = in_channel_length ic in
-  let buf = really_input_string ic len in
-  close_in ic;
-  buf
-
 let write_file path s =
   let oc = open_out path in
   output_string oc s;
@@ -40,7 +33,7 @@ let cmd_explain input =
   | Ok () ->
       Printf.printf "Workflow: %s\nActions: %d\n\n" wf.name (List.length wf.actions);
       wf.actions
-      |> List.iter (fun a ->
+      |> List.iter (fun (a : W3rt_scheduler.Types.action) ->
              Printf.printf "- %s: %s" a.id a.tool;
              (match a.depends_on with
              | [] -> ()
@@ -56,23 +49,23 @@ let out_opt =
   let doc = "Write plan JSON to file instead of stdout" in
   Arg.(value & opt (some string) None & info [ "out" ] ~docv:"PLAN.json" ~doc)
 
-let validate_t =
-  Term.(ret (const cmd_validate $ input_arg)),
-  Term.info "validate" ~doc:"Validate workflow JSON (ids, deps, cycles)"
+let validate_cmd =
+  let doc = "Validate workflow JSON (ids, deps, cycles)" in
+  let term = Term.(ret (const cmd_validate $ input_arg)) in
+  Cmd.v (Cmd.info "validate" ~doc) term
 
-let compile_t =
-  Term.(ret (const cmd_compile $ input_arg $ out_opt)),
-  Term.info "compile" ~doc:"Compile workflow JSON into w3rt.plan.v1 JSON"
+let compile_cmd =
+  let doc = "Compile workflow JSON into w3rt.plan.v1 JSON" in
+  let term = Term.(ret (const cmd_compile $ input_arg $ out_opt)) in
+  Cmd.v (Cmd.info "compile" ~doc) term
 
-let explain_t =
-  Term.(ret (const cmd_explain $ input_arg)),
-  Term.info "explain" ~doc:"Explain workflow JSON in human-readable form"
+let explain_cmd =
+  let doc = "Explain workflow JSON in human-readable form" in
+  let term = Term.(ret (const cmd_explain $ input_arg)) in
+  Cmd.v (Cmd.info "explain" ~doc) term
 
-let default_t =
+let default_cmd =
   let doc = "w3rt scheduler compiler" in
-  ( Term.(ret (const (`Help (`Pager, None)))),
-    Term.info "w3rt-scheduler" ~version:"0.1.0" ~doc )
+  Cmd.group (Cmd.info "w3rt-scheduler" ~version:"0.1.0" ~doc) [ validate_cmd; explain_cmd; compile_cmd ]
 
-let () =
-  let cmds = [ validate_t; compile_t; explain_t ] in
-  exit (Cmdliner.Cmd.eval_choice default_t cmds)
+let () = exit (Cmd.eval default_cmd)

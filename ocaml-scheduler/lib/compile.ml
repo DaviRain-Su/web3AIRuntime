@@ -3,13 +3,13 @@ open Types
 let to_plan (wf : workflow) : plan =
   let steps =
     wf.actions
-    |> List.map (fun a ->
-           {
-             id = a.id;
-             tool = a.tool;
-             params = a.params;
-             depends_on = a.depends_on;
-           })
+    |> List.map (fun (a : action) ->
+           ({
+              id = a.id;
+              tool = a.tool;
+              params = a.params;
+              depends_on = a.depends_on;
+            } : plan_step))
   in
   { schema = "w3rt.plan.v1"; workflow = wf.name; steps }
 
@@ -20,7 +20,7 @@ let plan_to_json (p : plan) : Yojson.Safe.t =
         ("id", `String s.id);
         ("tool", `String s.tool);
         ("params", s.params);
-        ("dependsOn", `List (List.map (fun d -> `String d) s.depends_on)));
+        ("dependsOn", `List (List.map (fun d -> `String d) s.depends_on));
       ]
   in
   `Assoc
