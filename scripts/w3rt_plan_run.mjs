@@ -1,0 +1,108 @@
+#!/usr/bin/env node
+/**
+ * w3rt_plan_run.mjs
+ * Execute a compiled plan (w3rt.plan.v1) produced by ocaml-scheduler.
+ *
+ * Usage:
+ *   node scripts/w3rt_plan_run.mjs --plan /path/to/plan.json
+ *
+ * Supports tools:
+ * - w3rt_balance
+ * - w3rt_swap_quote
+ * - w3rt_swap_exec
+ *
+ * Notes:
+ * - This runner is intentionally conservative: it executes steps in order and enforces dependsOn are completed.
+ * - Swap exec requires explicit confirm in plan params (e.g. I_CONFIRM).
+ */
+
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+
+function parseArgs(argv) {
+  const out = { plan: null };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--plan') out.plan = argv[++i];
+  }
+  return out;
+}
+
+function run(cmd, args) {
+  const res = spawnSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8' });
+  if (res.status !== 0) {
+    const err = (res.stderr || res.stdout || '').trim();
+    throw new Error(`Command failed: ${cmd} ${args.join(' ')}\n${err}`);
+  }
+  return (res.stdout || '').trim();
+}
+
+function jsonOrText(s) {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+async function main() {
+  const { plan } = parseArgs(process.argv.slice(2));
+  if (!plan) {
+    console.log('Usage: node scripts/w3rt_plan_run.mjs --plan /path/to/plan.json');
+    process.exit(1);
+  }
+
+  const raw = readFileSync(plan, 'utf-8');
+  const p = JSON.parse(raw);
+  if (p.schema !== 'w3rt.plan.v1') throw new Error(`Unsupported plan schema: ${p.schema}`);
+
+  const steps = Array.isArray(p.steps) ? p.steps : [];
+  const done = new Set();
+  const outputs = {};
+
+  for (const step of steps) {
+    const id = step.id;
+    const tool = step.tool;
+    const params = step.params || {};
+    const deps = Array.isArray(step.dependsOn) ? step.dependsOn : [];
+
+    for (const d of deps) {
+      if (!done.has(d)) throw new Error(`Step ${id} depends on ${d} but it has not completed`);
+    }
+
+    console.log(`\n==> Step ${id}: ${tool}`);
+
+    if (tool === 'w3rt_balance') {
+      const args = ['scripts/w3rt_balance.mjs'];
+      if (params.address) args.push('--address', String(params.address));
+      if (params.includeTokens === true) args.push('--include-tokens');
+      if (params.tokenMint) args.push('--token-mint', String(params.tokenMint));
+      const out = run('node', args);
+      outputs[id] = jsonOrText(out);
+    } else if (tool === 'w3rt_swap_quote') {
+      const args = ['scripts/w3rt_swap_safe.mjs', 'quote', '--from', String(params.from || params.fromToken || 'SOL'), '--to', String(params.to || params.toToken || 'USDC'), '--amount', String(params.amount || '0.01')];
+      if (params.slippageBps != null) args.push('--slippage-bps', String(params.slippageBps));
+      if (params.allowFallback === true) args.push('--allow-fallback');
+      const out = run('node', args);
+      const j = JSON.parse(out);
+      outputs[id] = j;
+      // expose quoteId for downstream swap_exec
+      outputs.__lastQuoteId = j.quoteId;
+    } else if (tool === 'w3rt_swap_exec') {
+      const quoteId = params.quoteId || outputs.__lastQuoteId;
+      if (!quoteId) throw new Error('swap_exec missing quoteId (and no previous swap_quote output found)');
+      const confirm = params.confirm;
+      if (!confirm) throw new Error('swap_exec missing confirm');
+      const args = ['scripts/w3rt_swap_safe.mjs', 'exec', '--quote-id', String(quoteId), '--confirm', String(confirm)];
+      const out = run('node', args);
+      outputs[id] = JSON.parse(out);
+    } else {
+      throw new Error(`Unsupported tool: ${tool}`);
+    }
+
+    done.add(id);
+  }
+
+  console.log('\n=== Plan completed ===');
+  console.log(JSON.stringify({ ok: true, workflow: p.workflow, outputs }, null, 2));
+}
+
+main().catch((e) => {
+  console.error(e?.stack || String(e));
+  process.exit(1);
+});
