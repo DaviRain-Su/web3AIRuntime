@@ -56,6 +56,13 @@ function tmpDir() {
   mkdirSync(d, { recursive: true });
   return d;
 }
+
+function runsDir() {
+  const d = join(w3rtDir(), 'runs');
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
 const QUOTE_STORE = join(tmpDir(), 'swap-quotes.json');
 
 function readQuoteStore() {
@@ -203,10 +210,40 @@ async function main() {
       simulation: { unitsConsumed: sim.unitsConsumed ?? null, simulatedOutAmount: sim.simulatedOutAmount ?? null }
     };
 
+    // Write run artifact for audit/replay
+    const runId = `swap_${Date.now()}_${String(sent.signature).slice(0, 8)}`;
+    const runPath = join(runsDir(), runId);
+    mkdirSync(runPath, { recursive: true });
+    const artifact = {
+      schema: 'w3rt.swap.v1',
+      runId,
+      createdAt: new Date().toISOString(),
+      quoteId,
+      route: q.route,
+      input: {
+        inputMint: q?.ctx?.quote?.quoteResponse?.inputMint ?? null,
+        outputMint: q?.ctx?.quote?.quoteResponse?.outputMint ?? null,
+        amountLamports: q?.ctx?.quote?.quoteResponse?.inAmount ?? null,
+        requestedSlippageBps: q?.ctx?.quote?.requestedSlippageBps ?? null,
+      },
+      tx: {
+        signature: sent.signature,
+        explorerUrl: `https://solscan.io/tx/${sent.signature}`,
+      },
+      simulation: {
+        ok: true,
+        unitsConsumed: sim.unitsConsumed ?? null,
+        simulatedOutAmount: sim.simulatedOutAmount ?? null,
+      },
+      confirm: conf,
+      policy: pol,
+    };
+    writeFileSync(join(runPath, 'swap.json'), JSON.stringify(artifact, null, 2));
+
     delete store[quoteId];
     writeQuoteStore(store);
 
-    console.log(JSON.stringify(out, null, 2));
+    console.log(JSON.stringify({ ...out, runId, artifactPath: join(runPath, 'swap.json') }, null, 2));
     return;
   }
 

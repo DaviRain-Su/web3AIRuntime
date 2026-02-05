@@ -47,6 +47,7 @@ node scripts/w3rt_swap_safe.mjs exec --quote-id <QUOTE_ID> --confirm I_CONFIRM
 ## Output handling
 
 - On success: show signature + Solscan link.
+- Also mention the saved audit artifact: `~/.w3rt/runs/<runId>/swap.json`.
 - On simulation failure: show the error + first ~30 logs and STOP.
 - Never execute multiple times for the same `quoteId`.
 
